@@ -1,0 +1,7 @@
+{
+  "name": "commonrig",
+  "description": "CommonRig for Claude Code",
+  "owner": { "name": "CommonRig" },
+  "plugins": [{ "name": "commonrig", "source": "./", "description": "CommonRig connection and capture for Claude Code" },
+    { "name": "commonrig-guard", "source": "./guard", "description": "Opt-in: checks your workspace's own rules before a command or edit runs, on this machine. Log mode first." }]
+}

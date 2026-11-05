@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "commonrig": { "type": "http", "url": "${user_config.workspace_url}" }
+  }
+}

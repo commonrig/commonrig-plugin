@@ -1,0 +1,9 @@
+{
+  "name": "commonrig-guard",
+  "version": "0.3.1",
+  "bundle": "guard.bundle.mjs",
+  "files": {
+    "guard.mjs": "a3c6a8d0006d47f4dd7bed93370c9c158521faba3fa02f461c4b3ccd4a7a293f",
+    "guard.bundle.mjs": "151a58e68677b32725f96564f864187bd8846e0848193738c76805997871ab5e"
+  }
+}

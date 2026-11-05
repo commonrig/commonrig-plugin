@@ -1,0 +1,17 @@
+{
+  "name": "commonrig-guard",
+  "displayName": "CommonRig guard",
+  "version": "0.3.1",
+  "description": "Checks your workspace's own rules before a command or edit runs, on this machine. CommonRig runs nothing.",
+  "author": {
+    "name": "CommonRig"
+  },
+  "userConfig": {
+    "workspace_url": {
+      "type": "string",
+      "title": "Workspace MCP URL",
+      "description": "Your workspace's address, ending in /mcp. It is on the connect page.",
+      "required": true
+    }
+  }
+}
