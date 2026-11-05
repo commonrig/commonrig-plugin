@@ -969,6 +969,162 @@ function closeSeam(masked) {
 [${head.length - front + back} chars dropped]
 ${tail.slice(back)}`;
 }
+var NOTICE_TAGS = ["system-reminder", "side-sessions-event"];
+var MESSAGE_TAGS = ["task-notification", "cross-session-message", "teammate-message", "agent-message"];
+var ANY_OPENER = new RegExp(`^<(?:${[...NOTICE_TAGS, ...MESSAGE_TAGS].join("|")})[\\s>]`);
+function firstAfter(sorted, at) {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = low + high >> 1;
+    if (sorted[mid] < at) low = mid + 1;
+    else high = mid;
+  }
+  return sorted[low] ?? null;
+}
+var positions = (text, pattern) => {
+  const out = /* @__PURE__ */ new Map();
+  for (const found of text.matchAll(pattern)) {
+    const list = out.get(found[1]);
+    if (list) list.push(found.index);
+    else out.set(found[1], [found.index]);
+  }
+  return out;
+};
+function pastesIn(text) {
+  const spans2 = [];
+  const closes = positions(text, /<\/pasted_content id="([^"\n]{1,128})">/g);
+  let past = 0;
+  for (const found of text.matchAll(/<pasted_content id="([^"\n]{1,128})">/g)) {
+    if (found.index < past) continue;
+    const close = firstAfter(closes.get(found[1]) ?? [], found.index);
+    past = close === null ? text.length : close + `</pasted_content id="${found[1]}">`.length;
+    spans2.push([found.index, past]);
+  }
+  return spans2;
+}
+function reach2(spans2) {
+  const out = [];
+  let far = -1;
+  for (const [, to] of spans2) out.push(far = Math.max(far, to));
+  return out;
+}
+var Guard = class {
+  constructor(spans2) {
+    this.spans = spans2;
+    this.far = reach2(spans2);
+  }
+  spans;
+  far;
+  /** Any span starting before `to` that ends past `from`. */
+  hits(from, to) {
+    let low = 0;
+    let high = this.spans.length;
+    while (low < high) {
+      const mid = low + high >> 1;
+      if (this.spans[mid][0] < to) low = mid + 1;
+      else high = mid;
+    }
+    return low > 0 && this.far[low - 1] > from;
+  }
+};
+function fencesOutside(text, skip) {
+  const spans2 = [];
+  let open = null;
+  for (const found of text.matchAll(/(?:^|\n)[ \t]{0,3}```/g)) {
+    if (skip.hits(found.index, found.index + found[0].length)) continue;
+    if (open === null) open = found.index;
+    else {
+      spans2.push([open, found.index + found[0].length]);
+      open = null;
+    }
+  }
+  if (open !== null) spans2.push([open, text.length]);
+  return spans2;
+}
+var isGap = (char) => char === " " || char === "	";
+function lineEnd(text, at) {
+  let next = at;
+  while (isGap(text[next])) next += 1;
+  if (next >= text.length) return next;
+  if (text[next] === "\n") return next + 1;
+  if (text[next] === "\r" && text[next + 1] === "\n") return next + 2;
+  return null;
+}
+function blocksIn(text, tags, pastes) {
+  const closes = positions(text, new RegExp(`<\\/(${tags.join("|")})>`, "g"));
+  const opener = new RegExp(`<(${tags.join("|")})(?:[ \\t][^>\\n<]*)?>`, "g");
+  const opens = positions(text, opener);
+  const cuts = [];
+  let chained = -1;
+  for (let found = opener.exec(text); found; found = opener.exec(text)) {
+    const at = found.index;
+    const tag = found[1];
+    let lineStart = at;
+    while (isGap(text[lineStart - 1])) lineStart -= 1;
+    if (!(lineStart === 0 || text[lineStart - 1] === "\n" || at === chained)) continue;
+    const close = firstAfter(closes.get(tag) ?? [], at + found[0].length);
+    if (close === null) continue;
+    if ((firstAfter(opens.get(tag) ?? [], at + 1) ?? Infinity) < close) continue;
+    const stop = close + tag.length + 3;
+    let next = stop;
+    while (isGap(text[next])) next += 1;
+    const ended = lineEnd(text, stop);
+    const before = ended === null && ANY_OPENER.test(text.slice(next, next + 32));
+    if (ended === null && !before) continue;
+    const from = at === chained ? at : lineStart;
+    const to = ended ?? next;
+    if (pastes.hits(from, to)) continue;
+    cuts.push([from, to]);
+    chained = before ? next : -1;
+    opener.lastIndex = stop;
+  }
+  return cuts;
+}
+function trimBlankEdges(text) {
+  let start = 0;
+  for (; ; ) {
+    const ended = lineEnd(text, start);
+    if (ended === null || ended === start) break;
+    start = ended;
+  }
+  let end = text.length;
+  for (; ; ) {
+    let back = end;
+    while (isGap(text[back - 1])) back -= 1;
+    if (text[back - 1] !== "\n") break;
+    back -= text[back - 2] === "\r" ? 2 : 1;
+    end = back;
+  }
+  return start >= end ? "" : text.slice(start, end);
+}
+function dropBlocks(text, tags) {
+  const pastes = new Guard(pastesIn(text));
+  const blocks = blocksIn(text, tags, pastes);
+  if (!blocks.length) return text;
+  const fences = new Guard(fencesOutside(text, new Guard([...pastesIn(text), ...blocks].sort((a, b) => a[0] - b[0]))));
+  const cuts = blocks.filter(([from, to]) => !fences.hits(from, to));
+  if (!cuts.length) return text;
+  let out = "";
+  let at = 0;
+  for (const [from, to] of cuts) {
+    out += text.slice(at, from);
+    at = to;
+  }
+  return trimBlankEdges(out + text.slice(at));
+}
+function stripHarness(raw) {
+  const quiet = dropBlocks(raw, NOTICE_TAGS);
+  const left2 = agentShaped(quiet) ? quiet : dropBlocks(quiet, MESSAGE_TAGS);
+  return left2 === raw ? { text: raw, stripped: false } : { text: left2, stripped: true };
+}
+var harnessOnly = (raw) => {
+  const { text, stripped } = stripHarness(raw);
+  return stripped && !text;
+};
+function agentShaped(text) {
+  return /^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/.test(text) || /^\s*<(agent-message|teammate-message|cross-session-message|channel)\s[\w-]+=[\s\S]*<\/\1>\s*$/.test(text);
+}
 
 // ../domain/src/library.ts
 var CATEGORY_WORDS = {
@@ -1040,7 +1196,8 @@ function splitPastes(prompt) {
 }
 var keyedHash = (raw, key) => createHmac2("sha256", key).update(raw).digest("hex");
 var segmentText = (masked) => readsAsSettings(masked) ? `[block, ${masked.length} chars, withheld]` : masked;
-function promptRow(raw, context, key) {
+function promptRow(given, context, key) {
+  const raw = stripHarness(given).text;
   const base = { ...context, type: "prompt", harness: HARNESS, capture: "hook", rule_version: RULE_VERSION, length: raw.length, preview: null };
   const bounded = maskBounded(raw);
   const { text: seamed, redactions } = maskText(bounded, key);
@@ -1067,9 +1224,11 @@ function cronMark(prompt, key) {
 function dropReason(prompt, agentId, crons, key) {
   if (typeof agentId === "string" && agentId) return "subagent";
   if (!prompt.trim()) return "empty";
-  if (/^\s*<agent-message\s[\w-]+=[\s\S]*<\/agent-message>\s*$/.test(prompt)) return "subagent";
-  if (/^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/.test(prompt)) return "notification";
-  if (/^\s*<(teammate-message|cross-session-message|channel)\s[\w-]+=[\s\S]*<\/\1>\s*$/.test(prompt)) return "other-session";
+  if (harnessOnly(prompt)) return "harness";
+  const left2 = stripHarness(prompt).text;
+  if (/^\s*<agent-message\s[\w-]+=[\s\S]*<\/agent-message>\s*$/.test(left2)) return "subagent";
+  if (/^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/.test(left2)) return "notification";
+  if (/^\s*<(teammate-message|cross-session-message|channel)\s[\w-]+=[\s\S]*<\/\1>\s*$/.test(left2)) return "other-session";
   if (crons.some((cron) => cron.chars > 0 && (cron.clipped || prompt.length === cron.chars) && keyedHash(prompt.slice(0, cron.chars), key) === cron.hash)) return "scheduled";
   return null;
 }
@@ -2487,6 +2646,15 @@ async function runArtifacts(flags2) {
   const args = { ...session ? { client_session: session } : {}, ...retired ? { retired } : {} };
   console.log(await mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "artifact_check", args));
 }
+async function runCleanHarness(flags2) {
+  const dir = dataDir();
+  const held = await readCredentials(dir);
+  if (!held?.refresh_token) {
+    console.log(JSON.stringify({ signed_in: false }));
+    return;
+  }
+  console.log(await mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "prompt_clean", flags2.includes("--apply") ? { apply: true } : {}));
+}
 async function runDecide(capture, flags2) {
   const dir = flags2.includes("--runner") ? runnerDir() : capture;
   const args = await decideArgs(flags2);
@@ -2638,6 +2806,8 @@ async function runCommand(command2, flags2) {
     await runQuota(flags2);
   } else if (command2 === "artifacts") {
     await runArtifacts(flags2);
+  } else if (command2 === "clean-harness") {
+    await runCleanHarness(flags2);
   } else if (command2 === "decide") {
     await runDecide(dir, flags2);
   } else if (command2 === "put") {
@@ -2648,7 +2818,7 @@ async function runCommand(command2, flags2) {
     const live = await transport(dir);
     console.log(live ? JSON.stringify(await flush(dir, live, Date.now())) : "not signed in: rows stay in the spool");
   } else {
-    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex] | runner connect <url>");
+    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex] | runner connect <url>");
     process.exitCode = 2;
   }
 }
