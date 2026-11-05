@@ -1,6 +1,6 @@
 // src/guard-cli.ts
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir as mkdir2 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 // src/auth.ts
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile as readFile2, rm as rm3 } from "node:fs/promises";
+import { mkdir, readFile as readFile2, rm as rm3 } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 
@@ -218,6 +218,89 @@ async function connect(options) {
     server.close();
     server.closeIdleConnections();
   }
+}
+var sleepFor = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var DEVICE_REDIRECT = "http://127.0.0.1/callback";
+async function connectDevice(options) {
+  assertSafeUrl(options.url);
+  const fetcher = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? sleepFor;
+  const endpoints = await discover(fetcher, options.url);
+  const machine = (options.machine ?? hostname()).slice(0, 64);
+  const prepared = [];
+  for (const ask of options.asks) {
+    const registered = await reach(fetcher, endpoints.registration, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(1e4),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: `${ask.clientName} on ${machine}`, redirect_uris: [DEVICE_REDIRECT], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], scope: ask.scope })
+    });
+    if (!registered.ok) throw new Error(`could not register: ${registered.status}`);
+    const { client_id: clientId } = await registered.json();
+    const verifier = b64url(randomBytes(32));
+    const state = b64url(randomBytes(16));
+    const query = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: DEVICE_REDIRECT,
+      code_challenge: b64url(createHash("sha256").update(verifier).digest()),
+      code_challenge_method: "S256",
+      state,
+      scope: ask.scope,
+      resource: options.url,
+      device: machine,
+      ...ask.extra
+    });
+    prepared.push({ ask, clientId, verifier, state, query: query.toString() });
+  }
+  const started = await reach(fetcher, `${endpoints.issuer}/oauth/device`, {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(1e4),
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ machine, asks: prepared.map((one) => ({ query: one.query, ticked: one.ask.ticked })) })
+  });
+  const begun = await started.json().catch(() => ({}));
+  if (!started.ok || !begun.device_code || !begun.user_code || !begun.verification_uri) throw new Error(`could not start the sign-in: ${begun.error_description ?? started.status}`);
+  for (const link of [begun.verification_uri, begun.verification_uri_complete ?? begun.verification_uri]) {
+    if (new URL(link).origin !== new URL(options.url).origin) throw new Error("this server names another sign-in host");
+  }
+  const expiresAt = now() + (begun.expires_in ?? 600) * 1e3;
+  options.show({ code: begun.user_code, url: begun.verification_uri, complete: begun.verification_uri_complete ?? begun.verification_uri, minutes: Math.round((begun.expires_in ?? 600) / 60) });
+  let interval = (begun.interval ?? 5) * 1e3;
+  let results = null;
+  while (!results) {
+    if (now() > expiresAt) throw new Error("the code ran out before anyone approved it, nothing saved. Run connect again");
+    await sleep(interval);
+    const response = await form(fetcher, `${endpoints.issuer}/oauth/device/poll`, { device_code: begun.device_code }).catch((error) => {
+      if (error instanceof Error && /didn't answer|couldn't reach/.test(error.message)) return null;
+      throw error;
+    });
+    if (!response) continue;
+    const reply = await response.json().catch(() => ({}));
+    if (response.ok && Array.isArray(reply.results)) results = reply.results;
+    else if (reply.error === "authorization_pending") continue;
+    else if (reply.error === "slow_down") interval += 5e3;
+    else if (reply.error === "access_denied") throw new Error("denied on the page, nothing saved");
+    else if (reply.error === "expired_token") throw new Error("the code ran out before anyone approved it, nothing saved. Run connect again");
+    else throw new Error(`sign-in did not finish: ${reply.error ?? response.status}`);
+  }
+  const done = [];
+  for (const one of prepared) {
+    const result = results.find((row) => row.state === one.state && row.code);
+    if (!result?.code) continue;
+    const body = { grant_type: "authorization_code", code: result.code, client_id: one.clientId, redirect_uri: DEVICE_REDIRECT, code_verifier: one.verifier, resource: options.url };
+    const response = await form(fetcher, endpoints.token, body).catch(() => form(fetcher, endpoints.token, body));
+    if (!response.ok) throw new Error(`sign-in refused for ${one.ask.label}: ${response.status}`);
+    const reply = await response.json();
+    if (!reply.access_token || !reply.refresh_token) throw new Error(`sign-in gave no token for ${one.ask.label}`);
+    await mkdir(one.ask.dir, { recursive: true, mode: 448 });
+    await save(one.ask.dir, { url: options.url, token_endpoint: endpoints.token, client_id: one.clientId, refresh_token: reply.refresh_token, access_token: reply.access_token, expires_at: now() + (reply.expires_in ?? 0) * 1e3, scope: reply.scope ?? one.ask.scope });
+    done.push(one.ask.label);
+  }
+  return done;
 }
 
 // src/codex.ts
@@ -918,7 +1001,7 @@ async function refreshDue(dir, now) {
 }
 var ENV_WORD = String.raw`CLAUDE_PLUGIN_(?:DATA|OPTION_WORKSPACE_URL)=(?:"[^"]*"|'[^']*'|[^\s"']*)\s+`;
 var GUARD_PATH = String.raw`(?:"(?:[^"]*[\\/])?guard\.mjs"|'(?:[^']*[\\/])?guard\.mjs'|(?:[^\s"']*[\\/])?guard\.mjs)`;
-var CONNECT = String.raw`connect(?:\s+(?:https?://[^\s"'()]+|--no-browser))*`;
+var CONNECT = String.raw`connect(?:\s+(?:https?://[^\s"'()]+|--no-browser|--loopback))*`;
 var OWN_COMMAND = new RegExp(String.raw`^\s*(?:${ENV_WORD})*node(?:\.exe)?\s+${GUARD_PATH}\s+(?:off|on|status|refresh(?:\s+--say)?|${CONNECT}|disconnect)\s*$`);
 var isOwnCommand = (command2) => Boolean(command2) && !/[;&|`\n#<>]|\$\(/.test(command2) && OWN_COMMAND.test(command2);
 var denied = (decision, reason) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision, permissionDecisionReason: reason } });
@@ -1027,7 +1110,7 @@ async function readStdin() {
 }
 async function runHook(dir) {
   const input = await readStdin();
-  await mkdir(dir, { recursive: true, mode: 448 });
+  await mkdir2(dir, { recursive: true, mode: 448 });
   if (input.hook_event_name === "SessionStart") {
     const note = await sessionNote(dir, Date.now(), Boolean(await readCredentials(dir)));
     if (note) process.stdout.write(sessionOutput(note));
@@ -1048,7 +1131,7 @@ async function runCodexHook(dir, flags2) {
 }
 async function run(command2, flags2) {
   const dir = flagValues(flags2, "--data")[0] ?? dataDir();
-  await mkdir(dir, { recursive: true, mode: 448 });
+  await mkdir2(dir, { recursive: true, mode: 448 });
   if (command2 === "hook" && flags2.includes("--codex")) return runCodexHook(dir, flags2).catch(() => void 0);
   if (command2 === "hook") return runHook(dir).catch(() => void 0);
   if (command2 === "refresh") {
@@ -1060,12 +1143,28 @@ async function run(command2, flags2) {
     const noBrowser = flags2.includes("--no-browser");
     const url = flags2.find((flag) => !flag.startsWith("--")) ?? process.env.CLAUDE_PLUGIN_OPTION_WORKSPACE_URL ?? (await readCredentials(dir))?.url;
     if (!url) {
-      console.log("usage: guard connect <workspace mcp url> [--no-browser]");
+      console.log("usage: guard connect <workspace mcp url> [--no-browser] [--loopback]");
       process.exitCode = 2;
       return;
     }
-    await connect({ url, dir, scope: SCOPE2, clientName: "CommonRig guard", show: (link) => console.log(`Open this, sign in and allow it, then paste the address you land on if asked:
+    if (flags2.includes("--loopback")) await connect({ url, dir, scope: SCOPE2, clientName: "CommonRig guard", show: (link) => console.log(`Open this, sign in and allow it, then paste the address you land on if asked:
 ${link}`), pasted: noBrowser ? pastedLine() : void 0 });
+    else {
+      const done = await connectDevice({
+        url,
+        asks: [{ label: "guard", dir, scope: SCOPE2, clientName: "CommonRig guard", ticked: true }],
+        show: ({ code, url: page, complete, minutes }) => console.log(`Open ${page} on any device signed in to CommonRig and enter:
+
+    ${code}
+
+Or open ${complete}
+The code works for ${minutes} minutes. Waiting...`)
+      });
+      if (!done.length) {
+        console.log("nothing was ticked, so nothing was saved");
+        process.exit(0);
+      }
+    }
     const fetched = await refresh(dir).catch(() => false);
     console.log(fetched ? "signed in: this machine now fetches its rules" : "signed in, but the rules did not come through yet. Run refresh, or it tries again by itself");
     process.exit(0);
@@ -1084,7 +1183,7 @@ ${link}`), pasted: noBrowser ? pastedLine() : void 0 });
     console.log(JSON.stringify(statusOf(await readCopy(dir), await switchedOff(dir), Boolean(await readCredentials(dir)), Date.now())));
     return;
   }
-  console.log("usage: guard hook | connect <url> [--no-browser] | disconnect | refresh [--say] | on | off | status");
+  console.log("usage: guard hook | connect <url> [--loopback] [--no-browser] | disconnect | refresh [--say] | on | off | status");
   process.exitCode = 2;
 }
 async function pastedLine() {

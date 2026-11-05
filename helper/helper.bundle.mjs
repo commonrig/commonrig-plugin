@@ -1,13 +1,13 @@
 // src/cli.ts
 import { spawn as spawn3 } from "node:child_process";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir3, hostname as hostname2 } from "node:os";
 import { join as join12 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile as readFile2, rm as rm3 } from "node:fs/promises";
+import { mkdir, readFile as readFile2, rm as rm3 } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join as join2 } from "node:path";
 
@@ -88,8 +88,8 @@ async function pauseState(dir, now) {
 
 // src/transport.ts
 function assertSafeUrl(url) {
-  const { protocol, hostname: hostname2 } = new URL(url);
-  if (protocol !== "https:" && hostname2 !== "localhost" && hostname2 !== "127.0.0.1") throw new Error("capture needs an https url");
+  const { protocol, hostname: hostname3 } = new URL(url);
+  if (protocol !== "https:" && hostname3 !== "localhost" && hostname3 !== "127.0.0.1") throw new Error("capture needs an https url");
 }
 function parseBody(contentType, body) {
   if (!contentType.includes("text/event-stream")) return JSON.parse(body);
@@ -295,6 +295,89 @@ async function connect(options) {
     server.closeIdleConnections();
   }
 }
+var sleepFor = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
+var DEVICE_REDIRECT = "http://127.0.0.1/callback";
+async function connectDevice(options) {
+  assertSafeUrl(options.url);
+  const fetcher = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? sleepFor;
+  const endpoints = await discover(fetcher, options.url);
+  const machine = (options.machine ?? hostname()).slice(0, 64);
+  const prepared = [];
+  for (const ask of options.asks) {
+    const registered = await reach(fetcher, endpoints.registration, {
+      method: "POST",
+      redirect: "error",
+      signal: AbortSignal.timeout(1e4),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: `${ask.clientName} on ${machine}`, redirect_uris: [DEVICE_REDIRECT], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], scope: ask.scope })
+    });
+    if (!registered.ok) throw new Error(`could not register: ${registered.status}`);
+    const { client_id: clientId } = await registered.json();
+    const verifier = b64url(randomBytes(32));
+    const state = b64url(randomBytes(16));
+    const query = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: DEVICE_REDIRECT,
+      code_challenge: b64url(createHash("sha256").update(verifier).digest()),
+      code_challenge_method: "S256",
+      state,
+      scope: ask.scope,
+      resource: options.url,
+      device: machine,
+      ...ask.extra
+    });
+    prepared.push({ ask, clientId, verifier, state, query: query.toString() });
+  }
+  const started = await reach(fetcher, `${endpoints.issuer}/oauth/device`, {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(1e4),
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ machine, asks: prepared.map((one2) => ({ query: one2.query, ticked: one2.ask.ticked })) })
+  });
+  const begun = await started.json().catch(() => ({}));
+  if (!started.ok || !begun.device_code || !begun.user_code || !begun.verification_uri) throw new Error(`could not start the sign-in: ${begun.error_description ?? started.status}`);
+  for (const link of [begun.verification_uri, begun.verification_uri_complete ?? begun.verification_uri]) {
+    if (new URL(link).origin !== new URL(options.url).origin) throw new Error("this server names another sign-in host");
+  }
+  const expiresAt = now() + (begun.expires_in ?? 600) * 1e3;
+  options.show({ code: begun.user_code, url: begun.verification_uri, complete: begun.verification_uri_complete ?? begun.verification_uri, minutes: Math.round((begun.expires_in ?? 600) / 60) });
+  let interval = (begun.interval ?? 5) * 1e3;
+  let results = null;
+  while (!results) {
+    if (now() > expiresAt) throw new Error("the code ran out before anyone approved it, nothing saved. Run connect again");
+    await sleep(interval);
+    const response = await form(fetcher, `${endpoints.issuer}/oauth/device/poll`, { device_code: begun.device_code }).catch((error) => {
+      if (error instanceof Error && /didn't answer|couldn't reach/.test(error.message)) return null;
+      throw error;
+    });
+    if (!response) continue;
+    const reply = await response.json().catch(() => ({}));
+    if (response.ok && Array.isArray(reply.results)) results = reply.results;
+    else if (reply.error === "authorization_pending") continue;
+    else if (reply.error === "slow_down") interval += 5e3;
+    else if (reply.error === "access_denied") throw new Error("denied on the page, nothing saved");
+    else if (reply.error === "expired_token") throw new Error("the code ran out before anyone approved it, nothing saved. Run connect again");
+    else throw new Error(`sign-in did not finish: ${reply.error ?? response.status}`);
+  }
+  const done = [];
+  for (const one2 of prepared) {
+    const result = results.find((row) => row.state === one2.state && row.code);
+    if (!result?.code) continue;
+    const body = { grant_type: "authorization_code", code: result.code, client_id: one2.clientId, redirect_uri: DEVICE_REDIRECT, code_verifier: one2.verifier, resource: options.url };
+    const response = await form(fetcher, endpoints.token, body).catch(() => form(fetcher, endpoints.token, body));
+    if (!response.ok) throw new Error(`sign-in refused for ${one2.ask.label}: ${response.status}`);
+    const reply = await response.json();
+    if (!reply.access_token || !reply.refresh_token) throw new Error(`sign-in gave no token for ${one2.ask.label}`);
+    await mkdir(one2.ask.dir, { recursive: true, mode: 448 });
+    await save(one2.ask.dir, { url: options.url, token_endpoint: endpoints.token, client_id: one2.clientId, refresh_token: reply.refresh_token, access_token: reply.access_token, expires_at: now() + (reply.expires_in ?? 0) * 1e3, scope: reply.scope ?? one2.ask.scope });
+    done.push(one2.ask.label);
+  }
+  return done;
+}
 
 // src/agent-source.ts
 import { execFile } from "node:child_process";
@@ -451,7 +534,7 @@ var flagValues = (flags2, name) => flags2.flatMap((flag2, index) => flag2 === na
 // src/hook.ts
 import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash2, createHmac as createHmac3, randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir, readdir as readdir2, readFile as readFile7, rm as rm5, stat as stat4 } from "node:fs/promises";
+import { mkdir as mkdir2, readdir as readdir2, readFile as readFile7, rm as rm5, stat as stat4 } from "node:fs/promises";
 import { join as join7 } from "node:path";
 
 // src/capture.ts
@@ -1393,7 +1476,7 @@ var shaped = (value, shape) => {
   return text && shape.test(text) ? text : null;
 };
 async function installKey(dir) {
-  await mkdir(join7(dir, "sessions"), { recursive: true, mode: 448 });
+  await mkdir2(join7(dir, "sessions"), { recursive: true, mode: 448 });
   const file = join7(dir, "install.key");
   const existing = await readFile7(file, "utf8").catch(() => "");
   if (INSTALL_KEY.test(existing)) return existing;
@@ -1665,7 +1748,7 @@ async function raise(dir, args, fetcher = fetch) {
 
 // src/runner.ts
 import { spawn } from "node:child_process";
-import { mkdir as mkdir2, readFile as readFile11, rename as rename3, rm as rm6, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile11, rename as rename3, rm as rm6, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import { dirname, join as join9, resolve, sep } from "node:path";
 
@@ -1919,7 +2002,7 @@ async function readPrompted(dir) {
 }
 async function writeBrief(dir, record) {
   const folder = join9(dir, "briefs");
-  await mkdir2(folder, { recursive: true, mode: 448 });
+  await mkdir3(folder, { recursive: true, mode: 448 });
   const path = join9(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
   await writeFile2(path, record.brief, { mode: 384 });
   return path;
@@ -1954,13 +2037,13 @@ async function pullExport(dir, parts, io) {
   const target = resolve(exportDir(dir));
   const fresh = `${target}.new`;
   await rm6(fresh, { recursive: true, force: true });
-  await mkdir2(fresh, { recursive: true, mode: 448 });
+  await mkdir3(fresh, { recursive: true, mode: 448 });
   const counts = {};
   let written = 0;
   const put = async (path, text) => {
     const file = resolve(fresh, path);
     if (!file.startsWith(fresh + sep)) return;
-    await mkdir2(dirname(file), { recursive: true, mode: 448 });
+    await mkdir3(dirname(file), { recursive: true, mode: 448 });
     await writeFile2(file, text, { mode: 384 });
     written += 1;
   };
@@ -2119,10 +2202,10 @@ function postBehind(dir) {
 }
 
 // src/cli.ts
-import { mkdir as mkdir4, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdir as mkdir5, writeFile as writeFile5 } from "node:fs/promises";
 
 // src/track.ts
-import { mkdir as mkdir3, readFile as readFile13, writeFile as writeFile4 } from "node:fs/promises";
+import { mkdir as mkdir4, readFile as readFile13, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join11 } from "node:path";
 var SESSION_ID2 = /^[\w.:-]{1,128}$/;
 var MARKS = "track-asked.json";
@@ -2142,7 +2225,7 @@ async function readMarks(dir) {
 }
 async function writeMarks(dir, marks) {
   const kept = Object.entries(marks).slice(-MAX_MARKS);
-  await mkdir3(dir, { recursive: true });
+  await mkdir4(dir, { recursive: true });
   await writeFile4(join11(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
 }
 async function handleTrack(mode, input, deps) {
@@ -2187,13 +2270,45 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join12(homedir3(), ".commonrig-lane");
+function machineAsks(primary, args, runnerExtra = {}) {
+  const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
+  const asks = [];
+  if (primary === "capture" || process.env.CLAUDE_PLUGIN_DATA) asks.push({ label: "capture", dir: dataDir(), scope: args.includes("--decisions") ? "capture decisions offline_access" : "capture offline_access", clientName: "CommonRig helper", ticked: wants("capture") });
+  asks.push({ label: "lanes", dir: laneDir(), scope: "read work:write offline_access", clientName: "Rig lanes", ticked: wants("lanes") });
+  asks.push({ label: "intake", dir: intakeDir(), scope: INTAKE_SCOPE, clientName: "CommonRig intake", ticked: wants("intake") });
+  asks.push({ label: "runner", dir: runnerDir(), scope: RUNNER_SCOPE, clientName: "CommonRig runner", ticked: wants("runner"), extra: runnerExtra });
+  return asks;
+}
+var overSsh = () => Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY);
+async function runDevice(url, asks, args) {
+  const done = await connectDevice({
+    url,
+    asks,
+    show: ({ code, url: page, complete, minutes }) => {
+      console.log(`To sign ${hostname2()} in, open ${page} on any device signed in to CommonRig and enter:
+
+    ${code}
+
+Or open ${complete}
+The code works for ${minutes} minutes. Waiting...`);
+      if (!args.includes("--no-browser") && !overSsh()) openBrowser(complete);
+    }
+  });
+  console.log(done.length ? `signed in: ${done.join(", ")}. Each is its own connection under Agents, revocable in one click` : "nothing was ticked, so nothing was saved");
+  return done;
+}
 async function runConnect(dir, args) {
   const noBrowser = args.includes("--no-browser");
   const url = args.find((arg) => !arg.startsWith("--")) ?? process.env.CLAUDE_PLUGIN_OPTION_WORKSPACE_URL ?? (await readCredentials(dir))?.url;
   if (!url) {
-    console.log("usage: helper connect <workspace mcp url> [--no-browser]");
+    console.log("usage: helper connect <workspace mcp url> [--lanes] [--intake] [--runner] [--all] [--decisions] [--no-browser] [--loopback]");
     process.exitCode = 2;
     return;
+  }
+  if (!args.includes("--loopback")) {
+    await runDevice(url, machineAsks("capture", args), args);
+    process.exit(0);
   }
   await connect({
     url,
@@ -2212,15 +2327,19 @@ ${authorizeUrl}`);
 }
 async function runRaise(flags2) {
   const dir = intakeDir();
-  await mkdir4(dir, { recursive: true, mode: 448 });
+  await mkdir5(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   if (action === "connect") {
     const noBrowser = rest.includes("--no-browser");
     const url = rest.find((arg) => !arg.startsWith("--")) ?? (await readCredentials(dir))?.url;
     if (!url) {
-      console.log("usage: helper raise connect <workspace mcp url> [--no-browser]");
+      console.log("usage: helper raise connect <workspace mcp url> [--no-browser] [--loopback]");
       process.exitCode = 2;
       return;
+    }
+    if (!rest.includes("--loopback")) {
+      await runDevice(url, machineAsks("intake", rest), rest);
+      process.exit(0);
     }
     await connect({
       url,
@@ -2254,10 +2373,10 @@ ${args}`);
   console.log(done.line);
   if (!done.ok) process.exitCode = 1;
 }
-var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] | runner disconnect";
+var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] [--loopback] | runner disconnect";
 async function runRunner(flags2) {
   const dir = runnerDir();
-  await mkdir4(dir, { recursive: true, mode: 448 });
+  await mkdir5(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   const value = (list, name) => flagValues(list, name).at(-1);
   if (action === "connect") {
@@ -2271,6 +2390,11 @@ async function runRunner(flags2) {
     const project = value(rest, "--project");
     const harness = value(rest, "--harness");
     const extra = { ...project ? { project } : {}, ...rest.includes("--flagged") ? { flagged: "1" } : {}, ...harness ? { harness } : {} };
+    if (!rest.includes("--loopback")) {
+      const done = await runDevice(url, machineAsks("runner", rest, extra), rest);
+      if (done.includes("runner")) console.log("start the runner with: helper runner --loop");
+      process.exit(0);
+    }
     await connect({
       url,
       dir,
@@ -2333,7 +2457,7 @@ async function readStdin() {
 }
 async function noteWhere() {
   const home = join12(homedir3(), ".commonrig");
-  await mkdir4(home, { recursive: true });
+  await mkdir5(home, { recursive: true });
   await writeFile5(join12(home, "helper.json"), JSON.stringify({ path: process.argv[1], data: dataDir() }));
 }
 async function runTrack(mode) {
