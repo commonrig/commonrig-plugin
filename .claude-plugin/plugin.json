@@ -1,7 +1,7 @@
 {
   "name": "commonrig",
   "displayName": "CommonRig",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Connects Claude Code to a CommonRig workspace and captures typed prompts and final replies, masked on your machine first.",
   "author": { "name": "CommonRig" },
   "userConfig": {

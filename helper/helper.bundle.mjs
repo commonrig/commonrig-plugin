@@ -1,7 +1,7 @@
 // src/cli.ts
 import { spawn as spawn3 } from "node:child_process";
 import { homedir as homedir3, hostname as hostname2 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
@@ -31,7 +31,7 @@ async function withLock(path, now, fn, waitMs = WAIT_MS) {
     const current = now + Date.now() - started;
     const modified = await stat(path).then((info) => info.mtimeMs, () => current);
     if (current - modified > STALE_MS) await rm(path, { force: true }).catch(() => void 0);
-    else await new Promise((resolve2) => setTimeout(resolve2, waitMs * (0.5 + Math.random())));
+    else await new Promise((resolve3) => setTimeout(resolve3, waitMs * (0.5 + Math.random())));
   }
   return null;
 }
@@ -42,15 +42,25 @@ import { readFile, rename, rm as rm2, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 var empty = () => ({ all: false, keys: [], serverUntil: 0 });
 var SERVER_PAUSE_MS = 5 * 6e4;
-async function read(dir) {
+async function readRaw(file) {
   try {
-    const parsed = JSON.parse(await readFile(join(dir, "pause.json"), "utf8"));
+    const parsed = JSON.parse(await readFile(file, "utf8"));
     if (typeof parsed !== "object" || !parsed) throw new Error("bad pause file");
-    return { ...empty(), ...parsed };
+    return { pause: { ...empty(), ...parsed }, missing: false };
   } catch (error) {
-    if (error.code === "ENOENT") return empty();
-    return { ...empty(), all: true };
+    return { pause: null, missing: error.code === "ENOENT" };
   }
+}
+async function read(dir) {
+  const { pause, missing } = await readRaw(join(dir, "pause.json"));
+  return pause ?? (missing ? empty() : { ...empty(), all: true });
+}
+async function readForChange(dir) {
+  const { pause, missing } = await readRaw(join(dir, "pause.json"));
+  if (pause) return pause;
+  if (missing) return empty();
+  const last = (await readRaw(join(dir, "pause.json.bak"))).pause;
+  return { ...empty(), keys: last?.keys ?? [], all: true };
 }
 async function writeAtomic(file, text) {
   const temp = `${file}.${randomUUID()}.tmp`;
@@ -63,24 +73,28 @@ async function writeAtomic(file, text) {
         await rm2(temp, { force: true });
         throw error;
       }
-      await new Promise((resolve2) => setTimeout(resolve2, 20 * (attempt + 1)));
+      await new Promise((resolve3) => setTimeout(resolve3, 20 * (attempt + 1)));
     }
   }
 }
-var write = (dir, value) => writeAtomic(join(dir, "pause.json"), JSON.stringify(value));
+var LOCK = "pause.lock";
+var write = async (dir, value) => {
+  await writeAtomic(join(dir, "pause.json"), JSON.stringify(value));
+  await writeAtomic(join(dir, "pause.json.bak"), JSON.stringify(value)).catch(() => void 0);
+};
+async function change(dir, edit) {
+  const go = async () => write(dir, edit(await readForChange(dir)));
+  if (await withLock(join(dir, LOCK), Date.now(), async () => (await go(), true)) === null) await go();
+}
 async function isPaused(dir, pauseKeys, now) {
   const pause = await read(dir);
   return pause.all || pause.serverUntil > now || pause.keys.some((key) => pauseKeys.includes(key));
 }
-async function setPause(dir, on, keys) {
-  const pause = await read(dir);
-  if (!keys) pause.all = on;
-  else pause.keys = on ? [.../* @__PURE__ */ new Set([...pause.keys, ...keys])] : pause.keys.filter((key) => !keys.includes(key));
-  await write(dir, pause);
-}
-async function holdForServer(dir, now) {
-  await write(dir, { ...await read(dir), serverUntil: now + SERVER_PAUSE_MS });
-}
+var setPause = (dir, on, keys) => change(dir, (pause) => {
+  if (!keys) return { ...pause, all: on };
+  return { ...pause, keys: on ? [.../* @__PURE__ */ new Set([...pause.keys, ...keys])] : pause.keys.filter((key) => !keys.includes(key)) };
+});
+var holdForServer = (dir, now) => change(dir, (pause) => ({ ...pause, serverUntil: now + SERVER_PAUSE_MS }));
 async function pauseState(dir, now) {
   const pause = await read(dir);
   return { all: pause.all, repos: pause.keys.length, server: pause.serverUntil > now };
@@ -141,7 +155,7 @@ function mcpTransport(options) {
 
 // src/auth.ts
 var FILE = "credentials.json";
-var LOCK = "credentials.lock";
+var LOCK2 = "credentials.lock";
 var SCOPE = "capture offline_access";
 var SIGN_IN_MS = 5 * 6e4;
 var EXPIRY_MARGIN_MS = 6e4;
@@ -164,7 +178,7 @@ var reach = (fetcher, url, init) => fetcher(url, init).catch((error) => {
 });
 var form = (fetcher, url, body) => reach(fetcher, url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(1e4), headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" }, body: new URLSearchParams(body) });
 var removeCredentials = async (dir) => {
-  await withLock(join2(dir, LOCK), Date.now(), () => rm3(join2(dir, FILE), { force: true }));
+  await withLock(join2(dir, LOCK2), Date.now(), () => rm3(join2(dir, FILE), { force: true }));
 };
 async function accessToken(dir, now, fetcher = fetch) {
   const fresh = (credentials) => credentials?.access_token && credentials.expires_at - EXPIRY_MARGIN_MS > now ? credentials.access_token : null;
@@ -172,7 +186,7 @@ async function accessToken(dir, now, fetcher = fetch) {
   if (!held?.refresh_token) return fresh(held);
   const valid = fresh(held);
   if (valid) return valid;
-  return withLock(join2(dir, LOCK), now, async () => {
+  return withLock(join2(dir, LOCK2), now, async () => {
     const current = await readCredentials(dir);
     const done = fresh(current);
     if (done || !current?.refresh_token) return done;
@@ -190,7 +204,7 @@ async function accessToken(dir, now, fetcher = fetch) {
   });
 }
 async function dropAccessToken(dir) {
-  await withLock(join2(dir, LOCK), Date.now(), async () => {
+  await withLock(join2(dir, LOCK2), Date.now(), async () => {
     const held = await readCredentials(dir);
     if (held) await save(dir, { ...held, access_token: null, expires_at: 0 });
   });
@@ -217,7 +231,7 @@ function parseCallback(address, state) {
   return url && code && url.searchParams.get("state") === state ? { code, iss: url.searchParams.get("iss") } : null;
 }
 function listen(state) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     let deliver = () => void 0;
     const callback = new Promise((done) => {
       deliver = done;
@@ -235,7 +249,7 @@ function listen(state) {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      resolve2({ server, port: typeof address === "object" && address ? address.port : 0, callback });
+      resolve3({ server, port: typeof address === "object" && address ? address.port : 0, callback });
     });
   });
 }
@@ -295,7 +309,7 @@ async function connect(options) {
     server.closeIdleConnections();
   }
 }
-var sleepFor = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms));
+var sleepFor = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
 var DEVICE_REDIRECT = "http://127.0.0.1/callback";
 async function connectDevice(options) {
   assertSafeUrl(options.url);
@@ -451,8 +465,8 @@ async function sessionSource(env, claudeArgs2) {
   const source = sourceOfArgs(args);
   return { source: source === "person" && SDK_ENTRY.test(entry) ? "maybe" : source, read: args !== null };
 }
-var run = (file, args) => new Promise((resolve2) => {
-  execFile(file, args, { timeout: LOOKUP_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve2(error ? null : stdout));
+var run = (file, args) => new Promise((resolve3) => {
+  execFile(file, args, { timeout: LOOKUP_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve3(error ? null : stdout));
 });
 async function linuxArgs(wanted = isClaude) {
   let pid = process.ppid;
@@ -1330,14 +1344,19 @@ var STALE_CLAIM_MS = 5 * 6e4;
 var USAGE_PER_BATCH = 20;
 var SPOOL = "spool.jsonl";
 var CLAIM = "spool.sending.";
-var LOCK2 = "spool.lock";
+var LOCK3 = "spool.lock";
 var LOCK_WAIT_MS = 15;
 async function append(dir, entries) {
   const write2 = () => appendFile(join6(dir, SPOOL), entries.map((entry) => `${JSON.stringify(entry)}
 `).join(""), { mode: 384 }).then(() => true);
-  if (!await withLock(join6(dir, LOCK2), Date.now(), write2, LOCK_WAIT_MS)) await write2();
+  if (!await withLock(join6(dir, LOCK3), Date.now(), write2, LOCK_WAIT_MS)) await write2();
 }
-var recordDrop = (dir, reason, count = 1) => append(dir, [{ drop: reason, count }]);
+var DROP_MAX_BYTES = SPOOL_MAX_BYTES + 256 * 1024;
+async function recordDrop(dir, reason, count = 1) {
+  const size = await stat2(join6(dir, SPOOL)).then((info) => info.size, () => 0);
+  if (size >= DROP_MAX_BYTES) return;
+  await append(dir, [{ drop: reason, count }]);
+}
 async function spoolRow(dir, row, pauseKeys) {
   const size = await stat2(join6(dir, SPOOL)).then((info) => info.size, () => 0);
   if (size >= SPOOL_MAX_BYTES) return recordDrop(dir, "spool_full");
@@ -1401,7 +1420,7 @@ async function claim(dir, now) {
       () => void 0
     );
   };
-  await withLock(join6(dir, LOCK2), now, () => take(SPOOL), LOCK_WAIT_MS);
+  await withLock(join6(dir, LOCK3), now, () => take(SPOOL), LOCK_WAIT_MS);
   for (const name of await readdir(dir)) {
     if (!name.startsWith(CLAIM) || claimed.includes(join6(dir, name))) continue;
     const modified = await stat2(join6(dir, name)).then((info) => info.mtimeMs, () => now);
@@ -1423,8 +1442,8 @@ function screenRow(row, list) {
 }
 async function flush(dir, transport2, now, ping = false) {
   const files = await claim(dir, now);
-  const read3 = (await Promise.all(files.map((file) => readFile6(file, "utf8").then((text) => ({ file, text }), () => null)))).filter((claimed) => claimed !== null);
-  const parsed = parse2(read3.map(({ text }) => text).join(""));
+  const read4 = (await Promise.all(files.map((file) => readFile6(file, "utf8").then((text) => ({ file, text }), () => null)))).filter((claimed) => claimed !== null);
+  const parsed = parse2(read4.map(({ text }) => text).join(""));
   const keep = [];
   const totals = [];
   for (const entry of parsed.usage) if (!await isPaused(dir, entry.pauseKeys, now)) totals.push(entry);
@@ -1462,7 +1481,7 @@ async function flush(dir, transport2, now, ping = false) {
   const held = queue.flat();
   const rest = [...held, ...usage, ...later, ...Object.entries(pending).map(([drop, count]) => ({ drop, count }))];
   if (rest.length) await append(dir, rest);
-  await Promise.all(read3.map(({ file }) => rm4(file, { force: true })));
+  await Promise.all(read4.map(({ file }) => rm4(file, { force: true })));
   return { sent, held: held.length };
 }
 async function spoolStatus(dir) {
@@ -1626,6 +1645,7 @@ async function readCodexUsage(path, session, hookModel = null) {
 var realSource = () => sessionSource(process.env, claudeArgs);
 var SESSION_MAX_AGE_MS = 30 * 24 * 60 * 6e4;
 var NEVER_SEND_COMMAND = /^\s*\/(?:commonrig:)?(?:never-send|names)\b|helper\.mjs"?\s+(?:never-send|names)\b/i;
+var PAUSE_COMMAND = /^\s*\/commonrig:(pause|resume)\b([^\n]*)\s*$/;
 var SESSION_ID = /^[\w-]{1,128}$/;
 var MODEL2 = /^[\w.:[\]-]{1,64}$/;
 var INSTALL_KEY = /^[0-9a-f]{64}$/;
@@ -1642,8 +1662,8 @@ async function installKey(dir) {
   await writeAtomic(file, randomBytes2(32).toString("hex"));
   return readFile7(file, "utf8");
 }
-var git = (cwd, args) => new Promise((resolve2) => {
-  execFile3("git", ["-C", cwd, ...args], { timeout: 1500 }, (error, stdout) => resolve2(error ? null : stdout.trim() || null));
+var git = (cwd, args) => new Promise((resolve3) => {
+  execFile3("git", ["-C", cwd, ...args], { timeout: 1500 }, (error, stdout) => resolve3(error ? null : stdout.trim() || null));
 });
 var gitRemote = (cwd) => git(cwd, ["remote", "get-url", "origin"]);
 var gitRoot = (cwd) => git(cwd, ["rev-parse", "--show-toplevel"]);
@@ -1712,6 +1732,13 @@ ${prompt}`).digest("hex").slice(0, 32);
   };
   const reason = dropReason(prompt, input.agent_id, state.crons ?? [], key);
   if (reason) return skip(reason);
+  const command2 = PAUSE_COMMAND.exec(prompt);
+  if (command2) {
+    const repo = /(?:^|\s)--repo\b/.test(command2[2] ?? "");
+    const keys = repo ? await repoKeys(str2(input.cwd) ?? "", key, deps.remote, deps.root) : null;
+    await setPause(dataDir2, command2[1] === "pause", keys && (command2[1] === "pause" ? keys.pin : keys.candidates));
+    return skip("harness");
+  }
   const list = await readNeverSend(dataDir2);
   const screened = screen(prompt, list);
   if (!screened.keep || NEVER_SEND_COMMAND.test(prompt)) return skip("never_send");
@@ -1866,14 +1893,14 @@ var MAX_BODY_BYTES = 2e4;
 var TIMEOUT_MS = 1e4;
 var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join8(homedir(), ".commonrig-intake");
 var one = (flags2, name) => flagValues(flags2, name).at(-1);
-async function raiseArgs(flags2, read3 = readFile10) {
+async function raiseArgs(flags2, read4 = readFile10) {
   const title = one(flags2, "--title")?.trim();
   const kind = one(flags2, "--kind") ?? "bug";
   const source = (one(flags2, "--source") ?? process.env.COMMONRIG_SOURCE ?? "command line").trim();
   if (!title) return "a --title is needed";
   if (!KINDS.includes(kind)) return `--kind is one of ${KINDS.join(", ")}`;
   const file = one(flags2, "--body-file");
-  const bytes = file ? await read3(file).catch(() => null) : null;
+  const bytes = file ? await read4(file).catch(() => null) : null;
   if (file && !bytes) return `can't read ${file}`;
   const body = bytes ? bytes.subarray(Math.max(0, bytes.length - MAX_BODY_BYTES)).toString("utf8") : one(flags2, "--body");
   const project = one(flags2, "--project");
@@ -2086,7 +2113,7 @@ function commandFor(harness, briefPath, windows = process.platform === "win32") 
   return windows ? `Get-Content -Raw "${briefPath}" | ${run2}` : `${run2} < '${briefPath.replaceAll("'", "'\\''")}'`;
 }
 function runHarness(harness, brief, env = {}) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const [command2, args] = harness === "claude" ? ["claude", ["-p"]] : ["codex", ["exec", "-"]];
     const child = spawn(command2, args, { stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32", windowsHide: true, env: { ...process.env, ...env } });
     let tail = "";
@@ -2099,11 +2126,11 @@ function runHarness(harness, brief, env = {}) {
     const limit = setTimeout(() => child.kill(), RUN_LIMIT_MS);
     child.on("error", (error) => {
       clearTimeout(limit);
-      resolve2({ code: 127, tail: `could not start ${command2}: ${error.message}` });
+      resolve3({ code: 127, tail: `could not start ${command2}: ${error.message}` });
     });
     child.on("close", (code) => {
       clearTimeout(limit);
-      resolve2({ code: code ?? 1, tail });
+      resolve3({ code: code ?? 1, tail });
     });
     child.stdin.end(brief);
   });
@@ -2141,11 +2168,11 @@ function readLink(link) {
     });
   });
 }
-async function readLinks(links, read3 = readLink) {
+async function readLinks(links, read4 = readLink) {
   const env = {};
   for (const link of links) {
     if (!envNameAllowed(link.name)) return { missing: link.name.slice(0, 64) };
-    const value = await read3(link);
+    const value = await read4(link);
     if (value === null) return { missing: link.name };
     env[link.name] = value;
   }
@@ -2361,7 +2388,7 @@ function postBehind(dir) {
 }
 
 // src/cli.ts
-import { mkdir as mkdir5, writeFile as writeFile5 } from "node:fs/promises";
+import { mkdir as mkdir6 } from "node:fs/promises";
 
 // src/track.ts
 import { mkdir as mkdir4, readFile as readFile13, writeFile as writeFile4 } from "node:fs/promises";
@@ -2404,11 +2431,120 @@ async function handleTrack(mode, input, deps) {
   return JSON.stringify({ decision: "block", reason: askLine(counts) });
 }
 
+// src/release-keys.ts
+var RELEASE_KEYS = ["MCowBQYDK2VwAyEAi8y0ShXULz6qfSv9l7mpyj8fZqgZO1b00YJwYg6Yozc="];
+
+// src/where.ts
+import { mkdir as mkdir5, readFile as readFile14, realpath, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join12, resolve as resolve2 } from "node:path";
+
+// src/release.ts
+import { createHash as createHash3, createPublicKey, verify } from "node:crypto";
+var releaseDigest = (bytes) => createHash3("sha256").update(Buffer.from(bytes).toString("latin1").replace(/\r\n/g, "\n"), "latin1").digest("hex");
+function parseManifest(text) {
+  try {
+    const value = JSON.parse(text);
+    if (typeof value.name !== "string" || typeof value.version !== "string" || typeof value.bundle !== "string") return null;
+    if (!value.files || typeof value.files !== "object" || typeof value.files[value.bundle] !== "string") return null;
+    return /^[\w.-]+\.mjs$/.test(value.bundle) ? value : null;
+  } catch {
+    return null;
+  }
+}
+function signedBy(keys, manifest, signature) {
+  const data = Buffer.from(manifest.replace(/\r\n/g, "\n"), "utf8");
+  const sig = Buffer.from(signature.trim(), "base64");
+  return keys.some((key) => {
+    try {
+      return verify(null, data, createPublicKey({ key: Buffer.from(key, "base64"), format: "der", type: "spki" }), sig);
+    } catch {
+      return false;
+    }
+  });
+}
+function checkRelease(keys, manifestText, bundle, signature) {
+  if (manifestText === null) return { ok: false, reason: "release.json is missing" };
+  const manifest = parseManifest(manifestText);
+  if (!manifest) return { ok: false, reason: "release.json is not a release manifest" };
+  if (bundle === null) return { ok: false, reason: `${manifest.bundle} is missing` };
+  if (releaseDigest(bundle) !== manifest.files[manifest.bundle]) return { ok: false, reason: `${manifest.bundle} is not the released ${manifest.version}` };
+  if (keys.length === 0) return { ok: true, manifest };
+  if (signature === null) return { ok: false, reason: "release.sig is missing: this copy is not a signed release" };
+  return signedBy(keys, manifestText, signature) ? { ok: true, manifest } : { ok: false, reason: "release.sig does not match a CommonRig release key" };
+}
+
+// src/where.ts
+var WHERE_FILE = "helper.json";
+var WHERE_KEPT_FILE = "where-kept.json";
+var read3 = (path) => readFile14(path).catch(() => null);
+async function launcherProblem(launcher, keys) {
+  if (!launcher) return "no launcher path";
+  if (keys.length === 0) return "not a signed release: no release key pinned";
+  const here = dirname2(launcher);
+  const manifestText = (await read3(join12(here, "release.json")))?.toString("utf8") ?? null;
+  let bundle = null;
+  let files = {};
+  try {
+    const parsed = JSON.parse(manifestText ?? "null");
+    if (typeof parsed?.bundle === "string" && /^[\w.-]+\.mjs$/.test(parsed.bundle)) bundle = parsed.bundle;
+    if (parsed?.files && typeof parsed.files === "object") files = parsed.files;
+  } catch {
+  }
+  const check = checkRelease(keys, manifestText, bundle ? await read3(join12(here, bundle)) : null, (await read3(join12(here, "release.sig")))?.toString("utf8") ?? null);
+  if (!check.ok) return `not a signed release: ${check.reason}`;
+  const name = basename(launcher);
+  if (name === check.manifest.bundle || typeof files[name] !== "string") return "not run through a release launcher";
+  const bytes = await read3(launcher);
+  if (!bytes || releaseDigest(bytes) !== files[name]) return `${name} is not the released ${check.manifest.version}`;
+  return null;
+}
+var realLauncher = (launcher) => launcher ? realpath(launcher).catch(() => launcher) : Promise.resolve(launcher);
+var sameFolder = (a, b) => {
+  const norm = (path) => process.platform === "win32" ? resolve2(path).toLowerCase() : resolve2(path);
+  return norm(a) === norm(b);
+};
+async function noteWhere(args) {
+  const launcher = await realLauncher(args.launcher);
+  const problem = await launcherProblem(launcher, args.keys);
+  const why = problem ?? ((await readCredentials(args.data))?.refresh_token ? null : `not signed in here (${args.data})`);
+  if (why) {
+    await mkdir5(args.data, { recursive: true }).then(() => writeFile5(join12(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
+    return { wrote: false, why };
+  }
+  const text = JSON.stringify({ path: launcher, data: args.data });
+  const file = join12(args.home, WHERE_FILE);
+  if (await readFile14(file, "utf8").catch(() => null) !== text) {
+    await mkdir5(args.home, { recursive: true });
+    await writeAtomic(file, text);
+  }
+  await rm7(join12(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
+  return { wrote: true };
+}
+async function whereStatus(home, data) {
+  let named;
+  try {
+    named = JSON.parse(await readFile14(join12(home, WHERE_FILE), "utf8")).data;
+  } catch {
+    return { helper_json: "missing", kept_why: await keptWhy(data) };
+  }
+  if (typeof named !== "string") return { helper_json: "names no data folder", kept_why: await keptWhy(data) };
+  if (sameFolder(named, data)) return { helper_json: "names this install", kept_why: null };
+  return { helper_json: `names another install: ${named}`, kept_why: await keptWhy(data) };
+}
+async function keptWhy(data) {
+  try {
+    const value = JSON.parse(await readFile14(join12(data, WHERE_KEPT_FILE), "utf8")).why;
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 // src/cli.ts
 var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
-var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join12(homedir3(), ".commonrig");
+var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join13(homedir3(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
   if (!held?.refresh_token) return null;
@@ -2429,7 +2565,7 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
-var laneDir = () => process.env.COMMONRIG_LANE_DIR || join12(homedir3(), ".commonrig-lane");
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join13(homedir3(), ".commonrig-lane");
 function machineAsks(primary, args, runnerExtra = {}) {
   const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
   const asks = [];
@@ -2467,6 +2603,7 @@ async function runConnect(dir, args) {
   }
   if (!args.includes("--loopback")) {
     await runDevice(url, machineAsks("capture", args), args);
+    await noteWhere2().catch(() => void 0);
     process.exit(0);
   }
   await connect({
@@ -2482,11 +2619,12 @@ ${authorizeUrl}`);
     pasted: noBrowser ? pastedLine() : void 0
   });
   console.log("signed in: capture now sends from this machine");
+  await noteWhere2().catch(() => void 0);
   process.exit(0);
 }
 async function runRaise(flags2) {
   const dir = intakeDir();
-  await mkdir5(dir, { recursive: true, mode: 448 });
+  await mkdir6(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   if (action === "connect") {
     const noBrowser = rest.includes("--no-browser");
@@ -2535,7 +2673,7 @@ ${args}`);
 var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] [--loopback] | runner disconnect";
 async function runRunner(flags2) {
   const dir = runnerDir();
-  await mkdir5(dir, { recursive: true, mode: 448 });
+  await mkdir6(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   const value = (list, name) => flagValues(list, name).at(-1);
   if (action === "connect") {
@@ -2587,7 +2725,7 @@ ${authorizeUrl}`);
   const allowed = asked ?? null;
   const ask = once && process.stdin.isTTY ? async (question) => {
     const lines = createInterface2({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise((resolve2) => lines.question(question, resolve2));
+    const answer = await new Promise((resolve3) => lines.question(question, resolve3));
     lines.close();
     return /^y(es)?$/i.test(answer.trim());
   } : null;
@@ -2601,7 +2739,7 @@ ${authorizeUrl}`);
   console.log(`runner polling every ${RUNNER_POLL_MS / 6e4} minutes${allowed ? `, running ${allowed} on records set to execute` : ", prompting only"}. Ctrl+C stops it`);
   for (; ; ) {
     await runnerOnce(dir, allowed, io).catch((error) => console.log(`poll failed: ${error instanceof Error ? error.message : "unknown error"}`));
-    await new Promise((resolve2) => setTimeout(resolve2, RUNNER_POLL_MS));
+    await new Promise((resolve3) => setTimeout(resolve3, RUNNER_POLL_MS));
   }
 }
 async function readStdin() {
@@ -2614,11 +2752,7 @@ async function readStdin() {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-async function noteWhere() {
-  const home = join12(homedir3(), ".commonrig");
-  await mkdir5(home, { recursive: true });
-  await writeFile5(join12(home, "helper.json"), JSON.stringify({ path: process.argv[1], data: dataDir() }));
-}
+var noteWhere2 = () => noteWhere({ home: join13(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
 async function runTrack(mode) {
   try {
     const input = JSON.parse(await readStdin());
@@ -2700,7 +2834,7 @@ async function runHook() {
   try {
     const input = JSON.parse(await readStdin());
     const out = await handleHook(input, { dataDir: dataDir(), transport: await transport(dataDir()), now: Date.now, source: realSource });
-    if (input.hook_event_name === "SessionStart") await noteWhere().catch(() => void 0);
+    if (input.hook_event_name === "SessionStart" || input.hook_event_name === "UserPromptSubmit") await noteWhere2().catch(() => void 0);
     if (out) process.stdout.write(out);
   } catch {
     await recordDrop(dataDir(), "hook_error").catch(() => void 0);
@@ -2710,32 +2844,32 @@ async function runHook() {
 async function runNeverSend(dir, args) {
   const line = args.length === 1 && args[0] === "-" ? await readStdin() : args.join(" ");
   const [action, ...rest] = neverSendArgs(line.trim());
-  const read3 = await readNeverSend(dir);
-  if (read3 === "unreadable") {
+  const read4 = await readNeverSend(dir);
+  if (read4 === "unreadable") {
     console.log(`never-send.json in ${dir} can't be read, so capture holds back every prompt and reply until it's fixed or removed`);
     process.exitCode = 1;
     return;
   }
   const words = rest.map(cleanWord).filter((word) => word !== null);
   if (action === "add" && words.length) {
-    const next = [.../* @__PURE__ */ new Set([...read3.words, ...words])];
+    const next = [.../* @__PURE__ */ new Set([...read4.words, ...words])];
     if (next.length > MAX_WORDS) {
       console.log(`the list holds at most ${MAX_WORDS} entries`);
       process.exitCode = 2;
       return;
     }
-    await writeNeverSend(dir, { ...read3, words: next });
+    await writeNeverSend(dir, { ...read4, words: next });
     console.log(`never-send: ${next.length} on the list, kept on this machine only`);
   } else if (action === "remove" && words.length) {
     const gone = new Set(words.map((word) => word.toLowerCase()));
-    const next = read3.words.filter((word) => !gone.has(word.toLowerCase()));
-    await writeNeverSend(dir, { ...read3, words: next });
+    const next = read4.words.filter((word) => !gone.has(word.toLowerCase()));
+    await writeNeverSend(dir, { ...read4, words: next });
     console.log(`never-send: ${next.length} on the list`);
   } else if (action === "mode" && (rest[0] === "drop" || rest[0] === "mask")) {
-    await writeNeverSend(dir, { ...read3, mode: rest[0] });
+    await writeNeverSend(dir, { ...read4, mode: rest[0] });
     console.log(rest[0] === "drop" ? "never-send: a prompt or reply with a listed word stays on this machine" : "never-send: listed words are swapped for [withheld] before anything is sent");
   } else if (action === "list") {
-    console.log(JSON.stringify({ mode: read3.mode, words: read3.words, file: join12(dir, "never-send.json") }));
+    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join13(dir, "never-send.json") }));
   } else {
     console.log('usage: helper never-send add <word or "a phrase"...> | remove <word...> | mode drop|mask | list');
     process.exitCode = 2;
@@ -2753,7 +2887,7 @@ async function runNames(dir, flags2) {
     if (!kept) return;
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
-    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join12(dir, NAMES_FILE)}`);
+    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join13(dir, NAMES_FILE)}`);
   } else if (!action || action === "list") {
     const names = await readNames(dir);
     console.log(names === null ? `${NAMES_FILE} could not be read, so every prompt counts as naming one` : names.length ? names.join("\n") : "no private names on this machine");
@@ -2799,7 +2933,7 @@ async function runCommand(command2, flags2) {
   } else if (command2 === "status") {
     const list = await readNeverSend(dir);
     const neverSend = list === "unreadable" ? "unreadable: holding everything back" : { mode: list.mode, words: list.words.length };
-    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir) }));
+    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join13(homedir3(), ".commonrig"), dir) }));
   } else if (command2 === "names") {
     await runNames(dir, flags2);
   } else if (command2 === "quota") {
