@@ -1937,6 +1937,7 @@ import { join as join9 } from "node:path";
 var INTAKE_SCOPE = "intake:write offline_access";
 var KINDS = ["bug", "finding", "task"];
 var MAX_BODY_BYTES = 2e4;
+var MAX_REPORT_BYTES = 6e4;
 var TIMEOUT_MS = 1e4;
 var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join9(homedir(), ".commonrig-intake");
 var one = (flags2, name) => flagValues(flags2, name).at(-1);
@@ -1955,6 +1956,30 @@ async function raiseArgs(flags2, read4 = readFile10) {
   return { title: maskSecrets(title), kind, source: maskSecrets(source), ...project ? { project } : {}, ...body ? { body: maskSecrets(body) } : {}, ...fingerprint ? { fingerprint } : {} };
 }
 async function raise(dir, args, fetcher = fetch) {
+  const done = await callIntake(dir, "intake_raise", args, fetcher);
+  if ("line" in done) return done;
+  return { ok: true, line: done.said.again ? `${done.said.id} seen again, ${done.said.count} times` : `${done.said.id} raised, not planned` };
+}
+async function reportArgs(flags2, read4 = readFile10) {
+  const title = one(flags2, "--title")?.trim();
+  const source = (one(flags2, "--source") ?? process.env.COMMONRIG_SOURCE ?? "command line").trim();
+  const file = one(flags2, "--body-file");
+  if (!title) return "a --title is needed";
+  if (!file) return "a --body-file holding the markdown is needed";
+  const bytes = await read4(file).catch(() => null);
+  if (!bytes) return `can't read ${file}`;
+  if (bytes.length > MAX_REPORT_BYTES) return `${file} is over ${MAX_REPORT_BYTES} bytes: a report is read whole, so cut it down`;
+  const project = one(flags2, "--project");
+  const item = one(flags2, "--item");
+  const fingerprint = one(flags2, "--fingerprint");
+  return { title: maskSecrets(title), markdown: maskSecrets(bytes.toString("utf8")), source: maskSecrets(source), ...project ? { project } : {}, ...item ? { item } : {}, ...fingerprint ? { fingerprint } : {} };
+}
+async function pushReport(dir, args, fetcher = fetch) {
+  const done = await callIntake(dir, "intake_report", args, fetcher);
+  if ("line" in done) return done;
+  return { ok: true, line: done.said.again ? `${done.said.id} seen again, ${done.said.count} times` : `${done.said.id} pushed to the Exchange` };
+}
+async function callIntake(dir, tool, args, fetcher) {
   const held = await readCredentials(dir);
   if (!held) return { ok: false, line: "not signed in for raising: run raise connect <workspace mcp url> first" };
   assertSafeUrl(held.url);
@@ -1965,7 +1990,7 @@ async function raise(dir, args, fetcher = fetch) {
     redirect: "error",
     signal: AbortSignal.timeout(TIMEOUT_MS),
     headers: { authorization: `Bearer ${token3}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "intake_raise", arguments: args } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } })
   });
   if (response.status === 401) await dropAccessToken(dir);
   if (response.status === 403) return { ok: false, line: "refused: this sign-in may not raise work. Run raise connect again" };
@@ -1976,7 +2001,7 @@ async function raise(dir, args, fetcher = fetch) {
   const text = reply?.result?.content?.[0]?.text ?? "";
   const said2 = JSON.parse(text || "{}");
   if (reply?.result?.isError || said2.error || !said2.id) return { ok: false, line: `refused: ${said2.error?.code ?? "error"}: ${said2.error?.message ?? "no reason given"}` };
-  return { ok: true, line: said2.again ? `${said2.id} seen again, ${said2.count} times` : `${said2.id} raised, not planned` };
+  return { said: { ...said2, id: said2.id } };
 }
 
 // src/runner-adapters.ts
@@ -2729,6 +2754,19 @@ ${authorizeUrl}`);
   if (action === "disconnect") {
     await removeCredentials(dir);
     console.log("signed out here. Revoke the device under Agents to end it on the server too");
+    return;
+  }
+  if (action === "report") {
+    const asked = await reportArgs(rest);
+    if (typeof asked === "string") {
+      console.log(`usage: helper raise report --title <words> --body-file <markdown file> [--project <p> | --item ITM-n] [--source <program>] [--fingerprint <x>]
+${asked}`);
+      process.exitCode = 2;
+      return;
+    }
+    const pushed = await pushReport(dir, asked);
+    console.log(pushed.line);
+    if (!pushed.ok) process.exitCode = 1;
     return;
   }
   const args = await raiseArgs(flags2);
