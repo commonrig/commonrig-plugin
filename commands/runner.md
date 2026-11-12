@@ -12,3 +12,8 @@ When the arguments start with `connect`, sign this machine in as a runner, once:
 Otherwise poll once and show what is ready, each with the command that runs it. Run nothing yourself: the person decides.
 
 `node "${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs" runner --once`
+
+
+Adapters: `--harness` at connect and `--execute` at run accept `claude`, `codex`, `opencode` and `custom`. The server's approved harness must match. Custom systems use `executor.json` in the runner data folder, with `command` and a string array `args`. Briefs arrive on stdin; zero means success, nonzero failure. No shell reads custom commands. Configure each coding client's own CommonRig agent connection separately.
+
+For hosted check-ins without a local runner, use Workspace, Hosted agents and its one-project consent preset. Call `start` with a stable `client_session` per worker thread and `said_by: agent` for a timer prompt, then keep the returned handle. Do not create a fresh session each tick or end it until retiring the worker.

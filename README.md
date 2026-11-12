@@ -69,7 +69,7 @@ Opt in on your quota page (`#/quota`, 'Show my quota'; the weekly burn hint is a
 
 ## Putting up a file
 
-An agent puts a screenshot up without its bytes passing through the chat: CommonRig's `file_upload_url` tool gives a link for one file, good once for 10 minutes, and `curl -T shot.png '<link>'` sends it. Where curl isn't there, `/commonrig:put <file> <link>` does the same through this plugin. It sends the file and nothing else, no sign-in, and only to the server this machine signed in to. A report then shows it with `<img src="file:FIL-n">`.
+An agent puts a screenshot up without its bytes passing through the chat: CommonRig's `file_upload_url` tool gives a link for one file, good once for 10 minutes, and `curl -T shot.png '<link>'` sends it. Where curl isn't there, `/commonrig:put <file> <link>` does the same through this plugin, and sends a png or jpeg as webp when the machine has `cwebp`, `magick` or `ffmpeg` and the webp is smaller (`--keep` sends the original). It sends the file and nothing else, no sign-in, and only to the server this machine signed in to. A report then shows it with `<img src="file:FIL-n">`.
 
 ## Codex
 

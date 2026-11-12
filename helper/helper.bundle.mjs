@@ -1,7 +1,7 @@
 // src/cli.ts
 import { spawn as spawn3 } from "node:child_process";
 import { homedir as homedir3, hostname as hostname2 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join15 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
@@ -572,6 +572,8 @@ var SECRET_PATTERNS = [
   token(String.raw`AKIA[0-9A-Z]{16}(?![0-9A-Z])`),
   token(String.raw`xox[abprs]-[A-Za-z0-9-]{20,}`),
   /\bBearer\s{1,8}[A-Za-z0-9._~+/-]{20,}=*/g,
+  // A public share link's token (ITM-5186): the link is the whole credential, so only its fingerprint is ever kept
+  /\/s\/[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g,
   /-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/g
 ];
 function maskSecrets(text) {
@@ -693,7 +695,7 @@ var SCAN_GUIDE = [
   "Never open .env files, .ssh, .aws, keys, credentials, auth.json, .claude.json or anything named token or secret. In a settings file skip env values. If a hook calls a script, read that script only if the person says so.",
   "Past use: ask the person which tools and hooks they rely on. Do not read old transcripts or shell history.",
   "Report what you found as a short list by kind, with what each does. Say which you would package, and which already look out of date.",
-  "Call setup_scan with the counts, even if there is nothing to package: that closes the step.",
+  "Call setup_scan with consented: true and the counts after the separate approval, even if there is nothing to package: that closes the step.",
   "If they pick some, call package_push with those files only, a part for each, a harness where it differs, and what it needs by name, never by value. It lands as a draft. An owner reads every file and accepts it in Learnings, then it can be brought to another machine from Deploy.",
   "From then on: when a packaged file changes, push it again with id. That makes a new version, and Deploy shows each machine as out of date until it is brought in.",
   ...POINTER_STEPS
@@ -1137,8 +1139,9 @@ var harnessOnly = (raw) => {
   return stripped && !text;
 };
 function agentShaped(text) {
-  return /^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/.test(text) || /^\s*<(agent-message|teammate-message|cross-session-message|channel)\s[\w-]+=[\s\S]*<\/\1>\s*$/.test(text);
+  return /^\s*<task-notification>[\s\S]*<\/task-notification>\s*$/.test(text) || /^\s*<(agent-message|teammate-message|cross-session-message|channel)\s[\w-]+=[\s\S]*<\/\1>\s*$/.test(text) || SESSION_BRIEF.test(text);
 }
+var SESSION_BRIEF = /^\s*Background \(from the session that started this one\):\r?\n[\s\S]*?\n\s*Task:\s*\r?\n/;
 
 // ../domain/src/library.ts
 var CATEGORY_WORDS = {
@@ -1822,7 +1825,11 @@ async function handleHook(input, deps) {
 }
 
 // src/put.ts
-import { readFile as readFile8 } from "node:fs/promises";
+import { execFile as execFile4 } from "node:child_process";
+import { randomBytes as randomBytes3 } from "node:crypto";
+import { readFile as readFile8, rm as rm6 } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as join8 } from "node:path";
 var LINK = /^\/up\/ws_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}$/;
 function linkProblem(link, signedInTo) {
   let url;
@@ -1838,19 +1845,59 @@ function linkProblem(link, signedInTo) {
   if (new URL(signedInTo).origin !== url.origin) return `this machine is signed in to ${new URL(signedInTo).origin}, and that link is somewhere else`;
   return null;
 }
-async function runPut(flags2, signedInTo, send = fetch) {
-  const words = flags2.join(" ").trim();
+var TO_WEBP = /\.(png|jpe?g)$/i;
+var KEEP = /(^|\s)--keep(?=\s|$)/g;
+var RUN_MS = 3e4;
+var CONVERTERS = [
+  { cmd: "cwebp", args: (input, output) => ["-quiet", "-q", "82", input, "-o", output] },
+  { cmd: "magick", args: (input, output) => [input, "-quality", "82", output] },
+  { cmd: "ffmpeg", args: (input, output) => ["-y", "-loglevel", "error", "-i", input, "-c:v", "libwebp", "-quality", "82", output] }
+];
+var runCommand = (cmd, args) => new Promise((resolve3) => {
+  execFile4(cmd, args, { timeout: RUN_MS, windowsHide: true }, (error) => {
+    if (!error) resolve3("ok");
+    else resolve3(error.code === "ENOENT" ? "missing" : "failed");
+  });
+});
+var isWebp = (bytes) => bytes.length > 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80;
+var kb = (size) => `${Math.max(1, Math.round(size / 1024))} KB`;
+async function webpOf(file, bytes, run2 = runCommand) {
+  if (!TO_WEBP.test(file)) return { bytes, note: "" };
+  let found = false;
+  for (const converter of CONVERTERS) {
+    const output = join8(tmpdir(), `cr-put-${randomBytes3(6).toString("hex")}.webp`);
+    try {
+      const ran = await run2(converter.cmd, converter.args(file, output));
+      if (ran === "missing") continue;
+      found = true;
+      if (ran !== "ok") continue;
+      const made = await readFile8(output).catch(() => null);
+      if (!made || !isWebp(made)) continue;
+      if (made.length >= bytes.length) return { bytes, note: `sent as is: webp came out no smaller (${kb(made.length)} from ${kb(bytes.length)})` };
+      return { bytes: made, note: `sent as webp (${kb(made.length)} from ${kb(bytes.length)})` };
+    } finally {
+      await rm6(output, { force: true }).catch(() => void 0);
+    }
+  }
+  return { bytes, note: found ? "sent as is: the webp converter failed on it" : "sent as is: no webp converter on this machine (cwebp, magick or ffmpeg)" };
+}
+async function runPut(flags2, signedInTo, send = fetch, run2 = runCommand) {
+  const joined = flags2.join(" ");
+  const keep = new RegExp(KEEP.source).test(joined);
+  const words = joined.replace(KEEP, " ").trim();
   const cut = words.lastIndexOf(" ");
   const file = cut > 0 ? words.slice(0, cut).trim().replace(/^"(.*)"$/, "$1") : "";
   const link = cut > 0 ? words.slice(cut + 1) : "";
   if (!file || !link) return { ok: false, line: "usage: helper put <file> <upload link from file_upload_url>" };
   const problem = linkProblem(link, signedInTo);
   if (problem) return { ok: false, line: `not sent: ${problem}` };
-  const bytes = await readFile8(file).catch(() => null);
-  if (!bytes) return { ok: false, line: `not sent: can't read ${file}` };
+  const original = await readFile8(file).catch(() => null);
+  if (!original) return { ok: false, line: `not sent: can't read ${file}` };
+  const { bytes, note } = keep ? { bytes: original, note: TO_WEBP.test(file) ? "sent as is (--keep)" : "" } : await webpOf(file, original, run2);
   const response = await send(link, { method: "PUT", body: bytes, headers: { "content-length": String(bytes.length) }, redirect: "error" });
-  const body = await response.text();
-  return { ok: response.ok, line: body.slice(0, 2e3) };
+  const body = (await response.text()).slice(0, 2e3);
+  return { ok: response.ok, line: note && response.ok ? `${body}
+${note}` : body };
 }
 
 // src/decide.ts
@@ -1886,12 +1933,12 @@ async function decideArgs(flags2) {
 // src/raise.ts
 import { readFile as readFile10 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var INTAKE_SCOPE = "intake:write offline_access";
 var KINDS = ["bug", "finding", "task"];
 var MAX_BODY_BYTES = 2e4;
 var TIMEOUT_MS = 1e4;
-var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join8(homedir(), ".commonrig-intake");
+var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join9(homedir(), ".commonrig-intake");
 var one = (flags2, name) => flagValues(flags2, name).at(-1);
 async function raiseArgs(flags2, read4 = readFile10) {
   const title = one(flags2, "--title")?.trim();
@@ -1932,11 +1979,26 @@ async function raise(dir, args, fetcher = fetch) {
   return { ok: true, line: said2.again ? `${said2.id} seen again, ${said2.count} times` : `${said2.id} raised, not planned` };
 }
 
+// src/runner-adapters.ts
+import { readFile as readFile11 } from "node:fs/promises";
+import { join as join10 } from "node:path";
+var RUNNER_HARNESSES = ["claude", "codex", "opencode", "custom"];
+async function runnerCommand(harness, dir) {
+  if (harness === "claude") return { command: "claude", args: ["-p"] };
+  if (harness === "codex") return { command: "codex", args: ["exec", "-"] };
+  if (harness === "opencode") return { command: "opencode", args: ["run"] };
+  const config = JSON.parse(await readFile11(join10(dir, "executor.json"), "utf8"));
+  if (!config || typeof config !== "object") throw new Error("executor.json must contain command and args");
+  const { command: command2, args } = config;
+  if (typeof command2 !== "string" || !command2.trim() || command2.includes("\0") || !Array.isArray(args) || !args.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new Error("executor.json must contain a command and an array of string arguments");
+  return { command: command2, args };
+}
+
 // src/runner.ts
 import { spawn } from "node:child_process";
-import { mkdir as mkdir3, readFile as readFile11, rename as rename3, rm as rm6, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir3, readFile as readFile12, rename as rename3, rm as rm7, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname, join as join9, resolve, sep } from "node:path";
+import { dirname, join as join11, resolve, sep } from "node:path";
 
 // ../domain/src/export-tree.ts
 var TITLES = {
@@ -2074,13 +2136,12 @@ function envNameAllowed(name) {
 
 // src/runner.ts
 var RUNNER_SCOPE = "runner offline_access";
-var RUNNER_HARNESSES = ["claude", "codex"];
 var RUNNER_POLL_MS = 2 * 60 * 1e3;
 var TIMEOUT_MS2 = 15e3;
 var SUMMARY_CHARS = 1500;
 var RUN_LIMIT_MS = 2 * 60 * 60 * 1e3;
-var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join9(homedir2(), ".commonrig-runner");
-var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join9(dir, "export");
+var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join11(homedir2(), ".commonrig-runner");
+var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join11(dir, "export");
 var MAX_PAGES = 1e4;
 async function runnerCall(dir, name, args, fetcher = fetch) {
   const held = await readCredentials(dir);
@@ -2109,13 +2170,20 @@ async function runnerCall(dir, name, args, fetcher = fetch) {
   }
 }
 function commandFor(harness, briefPath, windows = process.platform === "win32") {
-  const run2 = harness === "claude" ? "claude -p" : "codex exec -";
+  const run2 = harness === "claude" ? "claude -p" : harness === "codex" ? "codex exec -" : "opencode run";
+  if (harness === "custom") return "node <plugin folder>/helper/helper.mjs runner --once --execute custom";
   return windows ? `Get-Content -Raw "${briefPath}" | ${run2}` : `${run2} < '${briefPath.replaceAll("'", "'\\''")}'`;
 }
-function runHarness(harness, brief, env = {}) {
+async function runHarness(harness, brief, env = {}, dir = runnerDir()) {
+  let how;
+  try {
+    how = await runnerCommand(harness, dir);
+  } catch {
+    return { code: 127, tail: "Configure executor.json with command and args in your runner folder first" };
+  }
   return new Promise((resolve3) => {
-    const [command2, args] = harness === "claude" ? ["claude", ["-p"]] : ["codex", ["exec", "-"]];
-    const child = spawn(command2, args, { stdio: ["pipe", "pipe", "pipe"], shell: process.platform === "win32", windowsHide: true, env: { ...process.env, ...env } });
+    const { command: command2, args } = how;
+    const child = spawn(command2, args, { stdio: ["pipe", "pipe", "pipe"], shell: harness !== "custom" && process.platform === "win32", windowsHide: true, env: { ...process.env, ...env } });
     let tail = "";
     const keep = (chunk) => {
       process.stdout.write(chunk);
@@ -2181,15 +2249,15 @@ async function readLinks(links, read4 = readLink) {
 var summaryOf = (tail) => maskSecrets(tail.trim().slice(-SUMMARY_CHARS));
 async function readPrompted(dir) {
   try {
-    return new Set(JSON.parse(await readFile11(join9(dir, "prompted.json"), "utf8")));
+    return new Set(JSON.parse(await readFile12(join11(dir, "prompted.json"), "utf8")));
   } catch {
     return /* @__PURE__ */ new Set();
   }
 }
 async function writeBrief(dir, record) {
-  const folder = join9(dir, "briefs");
+  const folder = join11(dir, "briefs");
   await mkdir3(folder, { recursive: true, mode: 448 });
-  const path = join9(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
+  const path = join11(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
   await writeFile2(path, record.brief, { mode: 384 });
   return path;
 }
@@ -2209,9 +2277,13 @@ async function execute(dir, handle, harness, record, io) {
     io.say(`  ${record.id} not run: ${words}`);
     return;
   }
-  await call("runner_report", { id: record.id, status: "started", summary: `${harness} on this machine` });
+  const started = await call("runner_report", { id: record.id, status: "started", summary: `${harness} on this machine` });
+  if (started.error) {
+    io.say(`  ${record.id} not run: ${started.error.message ?? started.error.code}`);
+    return;
+  }
   io.say(`  running ${harness} on ${record.id}${record.env?.length ? ` with ${record.env.length} linked key${record.env.length === 1 ? "" : "s"}` : ""}`);
-  const done = await (io.run ?? runHarness)(harness, record.brief, keys.env);
+  const done = await (io.run ? io.run(harness, record.brief, keys.env) : runHarness(harness, record.brief, keys.env, dir));
   const ok = done.code === 0;
   const linked = Object.keys(keys.env).length > 0;
   const summary = (linked ? "" : summaryOf(done.tail)) || (ok ? "finished" : `exit ${done.code}`);
@@ -2222,7 +2294,7 @@ async function execute(dir, handle, harness, record, io) {
 async function pullExport(dir, parts, io) {
   const target = resolve(exportDir(dir));
   const fresh = `${target}.new`;
-  await rm6(fresh, { recursive: true, force: true });
+  await rm7(fresh, { recursive: true, force: true });
   await mkdir3(fresh, { recursive: true, mode: 448 });
   const counts = {};
   let written = 0;
@@ -2253,10 +2325,10 @@ async function pullExport(dir, parts, io) {
     }
   }
   for (const file of headFiles({ format: "commonrig-export", version: 2, workspace: "this workspace", scope: "mine", note: MINE_NOTE }, counts)) await put(file.path, file.text);
-  await rm6(`${target}.old`, { recursive: true, force: true });
+  await rm7(`${target}.old`, { recursive: true, force: true });
   await rename3(target, `${target}.old`).catch(() => void 0);
   await rename3(fresh, target);
-  await rm6(`${target}.old`, { recursive: true, force: true });
+  await rm7(`${target}.old`, { recursive: true, force: true });
   await runnerCall(dir, "runner_export", { done: true }, io.fetch);
   return written;
 }
@@ -2275,7 +2347,7 @@ async function runnerOnce(dir, allowed, io) {
   if (!reply.due.length) return 0;
   const prompted = await readPrompted(dir);
   for (const record of reply.due) {
-    const harness = allowed && (!reply.runner.harness || reply.runner.harness === allowed) ? allowed : null;
+    const harness = allowed && reply.runner.harness === allowed ? allowed : null;
     io.say(`${record.id} ${record.kind}: ${record.title}${record.project ? ` (${record.project})` : ""}${record.priority ? `, ${record.priority}` : ""}`);
     if (record.mode === "execute" && harness) {
       await execute(dir, reply.handle, harness, record, io);
@@ -2290,14 +2362,14 @@ async function runnerOnce(dir, allowed, io) {
     prompted.add(record.id);
     if (io.ask && harness && await io.ask(`  run ${record.id} with ${harness} now? [y/N] `)) await execute(dir, reply.handle, harness, record, io);
   }
-  await writeFile2(join9(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
+  await writeFile2(join11(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
   return reply.due.length;
 }
 
 // src/quota.ts
 import { spawn as spawn2 } from "node:child_process";
-import { readFile as readFile12, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join10 } from "node:path";
+import { readFile as readFile13, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join12 } from "node:path";
 
 // ../domain/src/quota.ts
 var QUOTA_EVERY_MS = 5 * 6e4;
@@ -2337,7 +2409,7 @@ var OFF_BACKOFF_MS = 60 * 6e4;
 var OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
 var read2 = async (path) => {
   try {
-    return JSON.parse(await readFile12(path, "utf8"));
+    return JSON.parse(await readFile13(path, "utf8"));
   } catch {
     return null;
   }
@@ -2347,20 +2419,20 @@ var left = (value) => typeof value === "number" ? `${Math.round(value)}%` : "?";
 async function recordStatusline(dir, raw, now, env = process.env) {
   const readings = claudeReadings(raw, accountLabel(env));
   if (!readings.length) return "";
-  await writeFile3(join10(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
+  await writeFile3(join12(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
   const five = readings.find((row) => row.window === "five_hour");
   const seven = readings.find((row) => row.window === "seven_day");
   return `5h ${left(five?.used_pct)} \xB7 7d ${left(seven?.used_pct)}`;
 }
 async function postDue(dir, now) {
-  const state = await read2(join10(dir, QUOTA_STATE));
+  const state = await read2(join12(dir, QUOTA_STATE));
   if (!state) return true;
   if (state.off_until && now < state.off_until) return false;
   return now - state.sent_at >= QUOTA_EVERY_MS;
 }
 async function collect(dir, env, fetcher = fetch) {
   const out = [];
-  const local = await read2(join10(dir, QUOTA_FILE));
+  const local = await read2(join12(dir, QUOTA_FILE));
   if (local?.readings) out.push(...local.readings);
   const key = env.COMMONRIG_OPENROUTER_KEY ?? env.OPENROUTER_API_KEY;
   if (key) {
@@ -2378,7 +2450,7 @@ async function postQuota(dir, now, call, env = process.env, fetcher = fetch, for
   if (!readings.length) return "nothing to send";
   const said2 = JSON.parse(await call(readings));
   const off = said2.on === false;
-  await writeFile3(join10(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
+  await writeFile3(join12(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
   return off ? "off" : "sent";
 }
 function postBehind(dir) {
@@ -2391,8 +2463,8 @@ function postBehind(dir) {
 import { mkdir as mkdir6 } from "node:fs/promises";
 
 // src/track.ts
-import { mkdir as mkdir4, readFile as readFile13, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join11 } from "node:path";
+import { mkdir as mkdir4, readFile as readFile14, writeFile as writeFile4 } from "node:fs/promises";
+import { join as join13 } from "node:path";
 var SESSION_ID2 = /^[\w.:-]{1,128}$/;
 var MARKS = "track-asked.json";
 var MAX_MARKS = 200;
@@ -2403,7 +2475,7 @@ function askLine(counts) {
 }
 async function readMarks(dir) {
   try {
-    const parsed = JSON.parse(await readFile13(join11(dir, MARKS), "utf8"));
+    const parsed = JSON.parse(await readFile14(join13(dir, MARKS), "utf8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
@@ -2412,7 +2484,7 @@ async function readMarks(dir) {
 async function writeMarks(dir, marks) {
   const kept = Object.entries(marks).slice(-MAX_MARKS);
   await mkdir4(dir, { recursive: true });
-  await writeFile4(join11(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
+  await writeFile4(join13(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
 }
 async function handleTrack(mode, input, deps) {
   const session = typeof input.session_id === "string" && SESSION_ID2.test(input.session_id) ? input.session_id : null;
@@ -2435,8 +2507,8 @@ async function handleTrack(mode, input, deps) {
 var RELEASE_KEYS = ["MCowBQYDK2VwAyEAi8y0ShXULz6qfSv9l7mpyj8fZqgZO1b00YJwYg6Yozc="];
 
 // src/where.ts
-import { mkdir as mkdir5, readFile as readFile14, realpath, rm as rm7, writeFile as writeFile5 } from "node:fs/promises";
-import { basename, dirname as dirname2, join as join12, resolve as resolve2 } from "node:path";
+import { mkdir as mkdir5, readFile as readFile15, realpath, rm as rm8, writeFile as writeFile5 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join14, resolve as resolve2 } from "node:path";
 
 // src/release.ts
 import { createHash as createHash3, createPublicKey, verify } from "node:crypto";
@@ -2476,12 +2548,12 @@ function checkRelease(keys, manifestText, bundle, signature) {
 // src/where.ts
 var WHERE_FILE = "helper.json";
 var WHERE_KEPT_FILE = "where-kept.json";
-var read3 = (path) => readFile14(path).catch(() => null);
+var read3 = (path) => readFile15(path).catch(() => null);
 async function launcherProblem(launcher, keys) {
   if (!launcher) return "no launcher path";
   if (keys.length === 0) return "not a signed release: no release key pinned";
   const here = dirname2(launcher);
-  const manifestText = (await read3(join12(here, "release.json")))?.toString("utf8") ?? null;
+  const manifestText = (await read3(join14(here, "release.json")))?.toString("utf8") ?? null;
   let bundle = null;
   let files = {};
   try {
@@ -2490,7 +2562,7 @@ async function launcherProblem(launcher, keys) {
     if (parsed?.files && typeof parsed.files === "object") files = parsed.files;
   } catch {
   }
-  const check = checkRelease(keys, manifestText, bundle ? await read3(join12(here, bundle)) : null, (await read3(join12(here, "release.sig")))?.toString("utf8") ?? null);
+  const check = checkRelease(keys, manifestText, bundle ? await read3(join14(here, bundle)) : null, (await read3(join14(here, "release.sig")))?.toString("utf8") ?? null);
   if (!check.ok) return `not a signed release: ${check.reason}`;
   const name = basename(launcher);
   if (name === check.manifest.bundle || typeof files[name] !== "string") return "not run through a release launcher";
@@ -2508,22 +2580,22 @@ async function noteWhere(args) {
   const problem = await launcherProblem(launcher, args.keys);
   const why = problem ?? ((await readCredentials(args.data))?.refresh_token ? null : `not signed in here (${args.data})`);
   if (why) {
-    await mkdir5(args.data, { recursive: true }).then(() => writeFile5(join12(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
+    await mkdir5(args.data, { recursive: true }).then(() => writeFile5(join14(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
     return { wrote: false, why };
   }
   const text = JSON.stringify({ path: launcher, data: args.data });
-  const file = join12(args.home, WHERE_FILE);
-  if (await readFile14(file, "utf8").catch(() => null) !== text) {
+  const file = join14(args.home, WHERE_FILE);
+  if (await readFile15(file, "utf8").catch(() => null) !== text) {
     await mkdir5(args.home, { recursive: true });
     await writeAtomic(file, text);
   }
-  await rm7(join12(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
+  await rm8(join14(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
   return { wrote: true };
 }
 async function whereStatus(home, data) {
   let named;
   try {
-    named = JSON.parse(await readFile14(join12(home, WHERE_FILE), "utf8")).data;
+    named = JSON.parse(await readFile15(join14(home, WHERE_FILE), "utf8")).data;
   } catch {
     return { helper_json: "missing", kept_why: await keptWhy(data) };
   }
@@ -2533,7 +2605,7 @@ async function whereStatus(home, data) {
 }
 async function keptWhy(data) {
   try {
-    const value = JSON.parse(await readFile14(join12(data, WHERE_KEPT_FILE), "utf8")).why;
+    const value = JSON.parse(await readFile15(join14(data, WHERE_KEPT_FILE), "utf8")).why;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
@@ -2544,7 +2616,7 @@ async function keptWhy(data) {
 var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
-var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join13(homedir3(), ".commonrig");
+var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join15(homedir3(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
   if (!held?.refresh_token) return null;
@@ -2565,7 +2637,7 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
-var laneDir = () => process.env.COMMONRIG_LANE_DIR || join13(homedir3(), ".commonrig-lane");
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join15(homedir3(), ".commonrig-lane");
 function machineAsks(primary, args, runnerExtra = {}) {
   const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
   const asks = [];
@@ -2670,7 +2742,7 @@ ${args}`);
   console.log(done.line);
   if (!done.ok) process.exitCode = 1;
 }
-var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] [--loopback] | runner disconnect";
+var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex|opencode|custom] [--no-browser] [--loopback] | runner disconnect";
 async function runRunner(flags2) {
   const dir = runnerDir();
   await mkdir6(dir, { recursive: true, mode: 448 });
@@ -2752,7 +2824,7 @@ async function readStdin() {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-var noteWhere2 = () => noteWhere({ home: join13(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
+var noteWhere2 = () => noteWhere({ home: join15(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
 async function runTrack(mode) {
   try {
     const input = JSON.parse(await readStdin());
@@ -2869,7 +2941,7 @@ async function runNeverSend(dir, args) {
     await writeNeverSend(dir, { ...read4, mode: rest[0] });
     console.log(rest[0] === "drop" ? "never-send: a prompt or reply with a listed word stays on this machine" : "never-send: listed words are swapped for [withheld] before anything is sent");
   } else if (action === "list") {
-    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join13(dir, "never-send.json") }));
+    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join15(dir, "never-send.json") }));
   } else {
     console.log('usage: helper never-send add <word or "a phrase"...> | remove <word...> | mode drop|mask | list');
     process.exitCode = 2;
@@ -2887,7 +2959,7 @@ async function runNames(dir, flags2) {
     if (!kept) return;
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
-    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join13(dir, NAMES_FILE)}`);
+    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join15(dir, NAMES_FILE)}`);
   } else if (!action || action === "list") {
     const names = await readNames(dir);
     console.log(names === null ? `${NAMES_FILE} could not be read, so every prompt counts as naming one` : names.length ? names.join("\n") : "no private names on this machine");
@@ -2916,7 +2988,7 @@ async function runQuota(flags2) {
   const call = (readings) => mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "quota_report", { readings });
   console.log(`quota: ${await postQuota(dir, Date.now(), call, process.env, fetch, flags2.includes("--now"))}`);
 }
-async function runCommand(command2, flags2) {
+async function runCommand2(command2, flags2) {
   const dir = dataDir();
   const key = await installKey(dir);
   const repo = flags2.includes("--repo") ? await repoKeys(process.cwd(), key) : null;
@@ -2933,7 +3005,7 @@ async function runCommand(command2, flags2) {
   } else if (command2 === "status") {
     const list = await readNeverSend(dir);
     const neverSend = list === "unreadable" ? "unreadable: holding everything back" : { mode: list.mode, words: list.words.length };
-    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join13(homedir3(), ".commonrig"), dir) }));
+    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join15(homedir3(), ".commonrig"), dir) }));
   } else if (command2 === "names") {
     await runNames(dir, flags2);
   } else if (command2 === "quota") {
@@ -2952,7 +3024,7 @@ async function runCommand(command2, flags2) {
     const live = await transport(dir);
     console.log(live ? JSON.stringify(await flush(dir, live, Date.now())) : "not signed in: rows stay in the spool");
   } else {
-    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex] | runner connect <url>");
+    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url>");
     process.exitCode = 2;
   }
 }
@@ -2972,7 +3044,7 @@ else if (command === "runner") {
     process.exitCode = 1;
   });
 } else {
-  await runCommand(command, flags).catch((error) => {
+  await runCommand2(command, flags).catch((error) => {
     console.log(`could not finish: ${error instanceof Error ? error.message : "unknown error"}`);
     process.exitCode = 1;
   });
