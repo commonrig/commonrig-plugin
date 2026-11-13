@@ -1,7 +1,7 @@
 // src/cli.ts
 import { spawn as spawn3 } from "node:child_process";
 import { homedir as homedir3, hostname as hostname2 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
@@ -547,9 +547,9 @@ var flagValues = (flags2, name) => flags2.flatMap((flag2, index) => flag2 === na
 
 // src/hook.ts
 import { execFile as execFile3 } from "node:child_process";
-import { createHash as createHash2, createHmac as createHmac3, randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir as mkdir2, readdir as readdir2, readFile as readFile7, rm as rm5, stat as stat4 } from "node:fs/promises";
-import { join as join7 } from "node:path";
+import { createHash as createHash3, createHmac as createHmac3, randomBytes as randomBytes2 } from "node:crypto";
+import { mkdir as mkdir3, readdir as readdir2, readFile as readFile8, rm as rm6, stat as stat4 } from "node:fs/promises";
+import { join as join8 } from "node:path";
 
 // src/capture.ts
 import { createHmac as createHmac2 } from "node:crypto";
@@ -685,6 +685,7 @@ var PACKAGE_STEPS = [
   "Install only on their yes. Fetch each file with package_get and its file argument, check it against its sha256, and write it under the harness folder named in home, at its path. Stop if a path would land anywhere else. A file that would replace one already there: ask first.",
   "Never run a file to install it. Never read a secret file to fill a need: ask the person, or leave the name for them to set.",
   "A part marked setting is never written whole over their own settings: merge it in, keep what is already there, and show the person the change first.",
+  "A file marked at repo goes under the root of the project's repo you are working in, never the harness folder, and only if git ignores it there (git check-ignore). If it doesn't, ask before adding it to .git/info/exclude.",
   "Then call package_installed with the machine name, so the Deploy page can show what is out of date.",
   POINTER_STEPS[0],
   POINTER_STEPS[2]
@@ -1644,6 +1645,76 @@ async function readCodexUsage(path, session, hookModel = null) {
   };
 }
 
+// src/instructions-cache.ts
+import { createHash as createHash2 } from "node:crypto";
+import { mkdir as mkdir2, readFile as readFile7, rm as rm5 } from "node:fs/promises";
+import { join as join7 } from "node:path";
+var CONTEXT_ROOM = 9e3;
+var BLOCK = /\n\[instructions\]\n([\s\S]*?)\n\[\/instructions\]/;
+var KEY2 = /^\d{1,15}:\d{1,9}(?:,\d{1,15}:\d{1,9}){0,20}$/;
+var POINTER = /^(?:Unchanged since|Not yet given|The same as the copy)/;
+var folderKey2 = (cwd) => {
+  let path = cwd.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (/^[a-z]:\//i.test(path)) path = path.toLowerCase();
+  return createHash2("sha256").update(path).digest("hex");
+};
+var fileFor = (dataDir2, cwd) => join7(dataDir2, "instructions", `${folderKey2(cwd)}.json`);
+function replyText(response) {
+  if (typeof response === "string") return response;
+  const list = Array.isArray(response) ? response : typeof response === "object" && response !== null && Array.isArray(response.content) ? response.content : null;
+  if (!list) return null;
+  const text = list.map((part) => typeof part === "object" && part !== null && typeof part.text === "string" ? part.text : "").join("");
+  return text || null;
+}
+function readServed(text) {
+  const head = text.split("\n\n")[0] ?? "";
+  let body;
+  try {
+    body = JSON.parse(head);
+  } catch {
+    return null;
+  }
+  const key = typeof body.instructions_key === "string" && KEY2.test(body.instructions_key) ? body.instructions_key : null;
+  const block = BLOCK.exec(text)?.[1] ?? null;
+  return { key, block: block && !POINTER.test(block) ? block : null, started: !("error" in body) && "resumed" in body };
+}
+async function noteServed(dataDir2, cwd, response, now) {
+  const text = replyText(response);
+  const served = text ? readServed(text) : null;
+  if (!served) return;
+  const file = fileFor(dataDir2, cwd);
+  if (!served.key) {
+    if (served.started) await rm5(file, { force: true });
+    return;
+  }
+  if (!served.block) return;
+  await mkdir2(join7(dataDir2, "instructions"), { recursive: true, mode: 448 });
+  await writeAtomic(file, JSON.stringify({ key: served.key, block: served.block, at: now }));
+}
+async function cachedFor(dataDir2, cwd) {
+  if (!cwd) return null;
+  try {
+    const raw = JSON.parse(await readFile7(fileFor(dataDir2, cwd), "utf8"));
+    return typeof raw.key === "string" && KEY2.test(raw.key) && typeof raw.block === "string" && typeof raw.at === "number" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+function cachedContext(cached, dataDir2, cwd) {
+  const day = new Date(cached.at).toISOString().slice(0, 10);
+  const lead = `CommonRig's instructions for this folder, as start last sent them (${day}), from the helper's own copy. start says if they changed.`;
+  if (cached.block.length <= CONTEXT_ROOM) return { text: `${lead}
+[instructions]
+${cached.block}
+[/instructions]`, whole: true };
+  const cut = cached.block.lastIndexOf("\n", CONTEXT_ROOM);
+  return { text: `${lead} Cut here for room: the whole copy is in ${fileFor(dataDir2, cwd)}, and start sends it whole.
+[instructions]
+${cached.block.slice(0, cut > 0 ? cut : CONTEXT_ROOM)}
+[/instructions]`, whole: false };
+}
+var injectedKey = (cached) => cached && cached.block.length <= CONTEXT_ROOM ? cached.key : null;
+
 // src/hook.ts
 var realSource = () => sessionSource(process.env, claudeArgs);
 var SESSION_MAX_AGE_MS = 30 * 24 * 60 * 6e4;
@@ -1658,12 +1729,12 @@ var shaped = (value, shape) => {
   return text && shape.test(text) ? text : null;
 };
 async function installKey(dir) {
-  await mkdir2(join7(dir, "sessions"), { recursive: true, mode: 448 });
-  const file = join7(dir, "install.key");
-  const existing = await readFile7(file, "utf8").catch(() => "");
+  await mkdir3(join8(dir, "sessions"), { recursive: true, mode: 448 });
+  const file = join8(dir, "install.key");
+  const existing = await readFile8(file, "utf8").catch(() => "");
   if (INSTALL_KEY.test(existing)) return existing;
   await writeAtomic(file, randomBytes2(32).toString("hex"));
-  return readFile7(file, "utf8");
+  return readFile8(file, "utf8");
 }
 var git = (cwd, args) => new Promise((resolve3) => {
   execFile3("git", ["-C", cwd, ...args], { timeout: 1500 }, (error, stdout) => resolve3(error ? null : stdout.trim() || null));
@@ -1673,18 +1744,18 @@ var gitRoot = (cwd) => git(cwd, ["rev-parse", "--show-toplevel"]);
 function normaliseRemote(url) {
   return url.replace(/^[a-z+]+:\/\//i, "").replace(/^[^/@]*@/, "").replace(/:\d+(?=\/)/, "").replace(/:(?=[^/\d])/, "/").replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase();
 }
-var sessionFile = (dir, session) => join7(dir, "sessions", `${createHash2("sha256").update(session).digest("hex").slice(0, 32)}.json`);
+var sessionFile = (dir, session) => join8(dir, "sessions", `${createHash3("sha256").update(session).digest("hex").slice(0, 32)}.json`);
 async function readSession(dir, session) {
-  const parsed = await readFile7(sessionFile(dir, session), "utf8").then((text) => JSON.parse(text), () => null);
+  const parsed = await readFile8(sessionFile(dir, session), "utf8").then((text) => JSON.parse(text), () => null);
   return typeof parsed === "object" && parsed ? parsed : {};
 }
 var writeSession = (dir, session, state) => writeAtomic(sessionFile(dir, session), JSON.stringify(state));
 async function pruneSessions(dir, now) {
-  const folder = join7(dir, "sessions");
+  const folder = join8(dir, "sessions");
   for (const name of await readdir2(folder)) {
-    const file = join7(folder, name);
+    const file = join8(folder, name);
     const modified = await stat4(file).then((info) => info.mtimeMs, () => now);
-    if (now - modified > SESSION_MAX_AGE_MS) await rm5(file, { force: true }).catch(() => void 0);
+    if (now - modified > SESSION_MAX_AGE_MS) await rm6(file, { force: true }).catch(() => void 0);
   }
 }
 var pathKey = (path, key) => {
@@ -1698,7 +1769,7 @@ function ancestors(path) {
 }
 async function repoKeys(cwd, key, remote = gitRemote, root = gitRoot) {
   const [url, top] = cwd ? await Promise.all([remote(cwd), root(cwd)]) : [null, null];
-  const repoHash = url ? createHash2("sha256").update(normaliseRemote(url)).digest("hex") : null;
+  const repoHash = url ? createHash3("sha256").update(normaliseRemote(url)).digest("hex") : null;
   const hashed = repoHash ? [repoHash] : [];
   return { repoHash, pin: [...hashed, pathKey(top ?? cwd, key)], candidates: [...hashed, ...ancestors(cwd).map((path) => pathKey(path, key))] };
 }
@@ -1784,28 +1855,35 @@ async function onStop(input, session, key, deps) {
   if (await isPaused(dataDir2, pauseKeys, deps.now())) return recordDrop(dataDir2, "paused");
   await spoolRow(dataDir2, replyRow(screened.text, { ...context, client_prompt_id: promptId }, key), pauseKeys);
 }
-function sessionContext(session, source) {
+function sessionContext(session, source, instructions = null) {
   const compacted = source === "compact" ? " Your context was just compacted: call summary with your handle for your claimed item, its request and its criteria. If the handle is gone, call start with that client_session." : "";
   return JSON.stringify({
     hookSpecificOutput: {
       hookEventName: "SessionStart",
-      additionalContext: `CommonRig client session: pass client_session "${session}" in the start call.${compacted}`
+      additionalContext: `CommonRig client session: pass client_session "${session}" in the start call.${compacted}${instructions ? `
+
+${instructions}` : ""}`
     }
   });
 }
 var START_TOOL = /^mcp__[\w-]*commonrig[\w-]*__start$/;
 var AGENT_ID = /^[\w.-]{1,64}$/;
-function startInput(input, session) {
+function startInput(input, session, held = null) {
   const tool = input.tool_input;
   if (!START_TOOL.test(str2(input.tool_name) ?? "") || !tool || typeof tool !== "object" || Array.isArray(tool)) return null;
   const agent = str2(input.agent_id);
-  const updatedInput = { ...tool, client_session: session, ...agent && AGENT_ID.test(agent) ? { subagent: agent } : {} };
+  const updatedInput = { ...tool, client_session: session, ...agent && AGENT_ID.test(agent) ? { subagent: agent } : {}, ...held && !agent ? { instructions_cached: held } : {} };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } });
 }
 async function handleHook(input, deps) {
   const session = str2(input.session_id);
   const event = str2(input.hook_event_name);
-  if (event === "PreToolUse") return session && SESSION_ID.test(session) ? startInput(input, session) : null;
+  if (event === "PreToolUse") return session && SESSION_ID.test(session) ? startInput(input, session, START_TOOL.test(str2(input.tool_name) ?? "") ? (await readSession(deps.dataDir, session).catch(() => ({}))).instructions ?? null : null) : null;
+  if (event === "PostToolUse") {
+    const cwd = str2(input.cwd);
+    if (cwd && START_TOOL.test(str2(input.tool_name) ?? "")) await noteServed(deps.dataDir, cwd, input.tool_response, deps.now()).catch(() => void 0);
+    return null;
+  }
   const key = await installKey(deps.dataDir);
   if (!session || !SESSION_ID.test(session)) {
     await recordDrop(deps.dataDir, "no_session");
@@ -1814,8 +1892,12 @@ async function handleHook(input, deps) {
   if (event === "SessionStart") {
     await pruneSessions(deps.dataDir, deps.now()).catch(() => void 0);
     const model = shaped(input.model, MODEL2);
-    if (model) await writeSession(deps.dataDir, session, { ...await readSession(deps.dataDir, session), model }).catch(() => void 0);
-    return sessionContext(session, str2(input.source));
+    const cwd = str2(input.cwd);
+    const cached = cwd ? await cachedFor(deps.dataDir, cwd).catch(() => null) : null;
+    const held = injectedKey(cached);
+    const state = await readSession(deps.dataDir, session).catch(() => ({}));
+    await writeSession(deps.dataDir, session, { ...state, ...model ? { model } : {}, instructions: held ?? void 0 }).catch(() => void 0);
+    return sessionContext(session, str2(input.source), cached && cwd ? cachedContext(cached, deps.dataDir, cwd).text : null);
   }
   if (event === "UserPromptSubmit") await onPrompt(input, session, key, deps);
   else if (event === "Stop") await onStop(input, session, key, deps);
@@ -1827,9 +1909,9 @@ async function handleHook(input, deps) {
 // src/put.ts
 import { execFile as execFile4 } from "node:child_process";
 import { randomBytes as randomBytes3 } from "node:crypto";
-import { readFile as readFile8, rm as rm6 } from "node:fs/promises";
+import { readFile as readFile9, rm as rm7 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 var LINK = /^\/up\/ws_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}$/;
 function linkProblem(link, signedInTo) {
   let url;
@@ -1865,18 +1947,18 @@ async function webpOf(file, bytes, run2 = runCommand) {
   if (!TO_WEBP.test(file)) return { bytes, note: "" };
   let found = false;
   for (const converter of CONVERTERS) {
-    const output = join8(tmpdir(), `cr-put-${randomBytes3(6).toString("hex")}.webp`);
+    const output = join9(tmpdir(), `cr-put-${randomBytes3(6).toString("hex")}.webp`);
     try {
       const ran = await run2(converter.cmd, converter.args(file, output));
       if (ran === "missing") continue;
       found = true;
       if (ran !== "ok") continue;
-      const made = await readFile8(output).catch(() => null);
+      const made = await readFile9(output).catch(() => null);
       if (!made || !isWebp(made)) continue;
       if (made.length >= bytes.length) return { bytes, note: `sent as is: webp came out no smaller (${kb(made.length)} from ${kb(bytes.length)})` };
       return { bytes: made, note: `sent as webp (${kb(made.length)} from ${kb(bytes.length)})` };
     } finally {
-      await rm6(output, { force: true }).catch(() => void 0);
+      await rm7(output, { force: true }).catch(() => void 0);
     }
   }
   return { bytes, note: found ? "sent as is: the webp converter failed on it" : "sent as is: no webp converter on this machine (cwebp, magick or ffmpeg)" };
@@ -1891,7 +1973,7 @@ async function runPut(flags2, signedInTo, send = fetch, run2 = runCommand) {
   if (!file || !link) return { ok: false, line: "usage: helper put <file> <upload link from file_upload_url>" };
   const problem = linkProblem(link, signedInTo);
   if (problem) return { ok: false, line: `not sent: ${problem}` };
-  const original = await readFile8(file).catch(() => null);
+  const original = await readFile9(file).catch(() => null);
   if (!original) return { ok: false, line: `not sent: can't read ${file}` };
   const { bytes, note } = keep ? { bytes: original, note: TO_WEBP.test(file) ? "sent as is (--keep)" : "" } : await webpOf(file, original, run2);
   const response = await send(link, { method: "PUT", body: bytes, headers: { "content-length": String(bytes.length) }, redirect: "error" });
@@ -1901,7 +1983,7 @@ ${note}` : body };
 }
 
 // src/decide.ts
-import { readFile as readFile9 } from "node:fs/promises";
+import { readFile as readFile10 } from "node:fs/promises";
 var DECIDE_TIMEOUT_MS = 1500;
 var PRESETS = ["reads_like", "pick_best_hit", "covers_topic", "lane_state", "failure_triage", "skill_suggest"];
 var flag = (flags2, name) => {
@@ -1915,7 +1997,7 @@ async function decideArgs(flags2) {
   const caller = flag(flags2, "--caller");
   const timeout2 = Number(flag(flags2, "--timeout") ?? 1e3);
   if (!stateFile) return "usage: helper decide --preset <name> --state-file <input.json> | --state-file <state> --questions-file <questions.json> [--caller <label>] [--timeout <ms>]";
-  const text = await readFile9(stateFile, "utf8");
+  const text = await readFile10(stateFile, "utf8");
   const extra = { ...caller ? { caller } : {}, timeout_ms: Number.isFinite(timeout2) ? Math.min(Math.max(timeout2, 300), 1e3) : 1e3 };
   if (preset) {
     if (!PRESETS.includes(preset)) return `preset is one of ${PRESETS.join(", ")}`;
@@ -1927,21 +2009,21 @@ async function decideArgs(flags2) {
     state = JSON.parse(text);
   } catch {
   }
-  return { state, questions: JSON.parse(await readFile9(questionsFile, "utf8")), ...extra };
+  return { state, questions: JSON.parse(await readFile10(questionsFile, "utf8")), ...extra };
 }
 
 // src/raise.ts
-import { readFile as readFile10 } from "node:fs/promises";
+import { readFile as readFile11 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var INTAKE_SCOPE = "intake:write offline_access";
 var KINDS = ["bug", "finding", "task"];
 var MAX_BODY_BYTES = 2e4;
 var MAX_REPORT_BYTES = 6e4;
 var TIMEOUT_MS = 1e4;
-var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join9(homedir(), ".commonrig-intake");
+var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join10(homedir(), ".commonrig-intake");
 var one = (flags2, name) => flagValues(flags2, name).at(-1);
-async function raiseArgs(flags2, read4 = readFile10) {
+async function raiseArgs(flags2, read4 = readFile11) {
   const title = one(flags2, "--title")?.trim();
   const kind = one(flags2, "--kind") ?? "bug";
   const source = (one(flags2, "--source") ?? process.env.COMMONRIG_SOURCE ?? "command line").trim();
@@ -1960,7 +2042,7 @@ async function raise(dir, args, fetcher = fetch) {
   if ("line" in done) return done;
   return { ok: true, line: done.said.again ? `${done.said.id} seen again, ${done.said.count} times` : `${done.said.id} raised, not planned` };
 }
-async function reportArgs(flags2, read4 = readFile10) {
+async function reportArgs(flags2, read4 = readFile11) {
   const title = one(flags2, "--title")?.trim();
   const source = (one(flags2, "--source") ?? process.env.COMMONRIG_SOURCE ?? "command line").trim();
   const file = one(flags2, "--body-file");
@@ -2005,14 +2087,14 @@ async function callIntake(dir, tool, args, fetcher) {
 }
 
 // src/runner-adapters.ts
-import { readFile as readFile11 } from "node:fs/promises";
-import { join as join10 } from "node:path";
+import { readFile as readFile12 } from "node:fs/promises";
+import { join as join11 } from "node:path";
 var RUNNER_HARNESSES = ["claude", "codex", "opencode", "custom"];
 async function runnerCommand(harness, dir) {
   if (harness === "claude") return { command: "claude", args: ["-p"] };
   if (harness === "codex") return { command: "codex", args: ["exec", "-"] };
   if (harness === "opencode") return { command: "opencode", args: ["run"] };
-  const config = JSON.parse(await readFile11(join10(dir, "executor.json"), "utf8"));
+  const config = JSON.parse(await readFile12(join11(dir, "executor.json"), "utf8"));
   if (!config || typeof config !== "object") throw new Error("executor.json must contain command and args");
   const { command: command2, args } = config;
   if (typeof command2 !== "string" || !command2.trim() || command2.includes("\0") || !Array.isArray(args) || !args.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new Error("executor.json must contain a command and an array of string arguments");
@@ -2021,9 +2103,9 @@ async function runnerCommand(harness, dir) {
 
 // src/runner.ts
 import { spawn } from "node:child_process";
-import { mkdir as mkdir3, readFile as readFile12, rename as rename3, rm as rm7, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir4, readFile as readFile13, rename as rename3, rm as rm8, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname, join as join11, resolve, sep } from "node:path";
+import { dirname, join as join12, resolve, sep } from "node:path";
 
 // ../domain/src/export-tree.ts
 var TITLES = {
@@ -2165,8 +2247,8 @@ var RUNNER_POLL_MS = 2 * 60 * 1e3;
 var TIMEOUT_MS2 = 15e3;
 var SUMMARY_CHARS = 1500;
 var RUN_LIMIT_MS = 2 * 60 * 60 * 1e3;
-var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join11(homedir2(), ".commonrig-runner");
-var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join11(dir, "export");
+var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join12(homedir2(), ".commonrig-runner");
+var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join12(dir, "export");
 var MAX_PAGES = 1e4;
 async function runnerCall(dir, name, args, fetcher = fetch) {
   const held = await readCredentials(dir);
@@ -2274,15 +2356,15 @@ async function readLinks(links, read4 = readLink) {
 var summaryOf = (tail) => maskSecrets(tail.trim().slice(-SUMMARY_CHARS));
 async function readPrompted(dir) {
   try {
-    return new Set(JSON.parse(await readFile12(join11(dir, "prompted.json"), "utf8")));
+    return new Set(JSON.parse(await readFile13(join12(dir, "prompted.json"), "utf8")));
   } catch {
     return /* @__PURE__ */ new Set();
   }
 }
 async function writeBrief(dir, record) {
-  const folder = join11(dir, "briefs");
-  await mkdir3(folder, { recursive: true, mode: 448 });
-  const path = join11(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
+  const folder = join12(dir, "briefs");
+  await mkdir4(folder, { recursive: true, mode: 448 });
+  const path = join12(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
   await writeFile2(path, record.brief, { mode: 384 });
   return path;
 }
@@ -2319,14 +2401,14 @@ async function execute(dir, handle, harness, record, io) {
 async function pullExport(dir, parts, io) {
   const target = resolve(exportDir(dir));
   const fresh = `${target}.new`;
-  await rm7(fresh, { recursive: true, force: true });
-  await mkdir3(fresh, { recursive: true, mode: 448 });
+  await rm8(fresh, { recursive: true, force: true });
+  await mkdir4(fresh, { recursive: true, mode: 448 });
   const counts = {};
   let written = 0;
   const put = async (path, text) => {
     const file = resolve(fresh, path);
     if (!file.startsWith(fresh + sep)) return;
-    await mkdir3(dirname(file), { recursive: true, mode: 448 });
+    await mkdir4(dirname(file), { recursive: true, mode: 448 });
     await writeFile2(file, text, { mode: 384 });
     written += 1;
   };
@@ -2350,10 +2432,10 @@ async function pullExport(dir, parts, io) {
     }
   }
   for (const file of headFiles({ format: "commonrig-export", version: 2, workspace: "this workspace", scope: "mine", note: MINE_NOTE }, counts)) await put(file.path, file.text);
-  await rm7(`${target}.old`, { recursive: true, force: true });
+  await rm8(`${target}.old`, { recursive: true, force: true });
   await rename3(target, `${target}.old`).catch(() => void 0);
   await rename3(fresh, target);
-  await rm7(`${target}.old`, { recursive: true, force: true });
+  await rm8(`${target}.old`, { recursive: true, force: true });
   await runnerCall(dir, "runner_export", { done: true }, io.fetch);
   return written;
 }
@@ -2387,14 +2469,14 @@ async function runnerOnce(dir, allowed, io) {
     prompted.add(record.id);
     if (io.ask && harness && await io.ask(`  run ${record.id} with ${harness} now? [y/N] `)) await execute(dir, reply.handle, harness, record, io);
   }
-  await writeFile2(join11(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
+  await writeFile2(join12(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
   return reply.due.length;
 }
 
 // src/quota.ts
 import { spawn as spawn2 } from "node:child_process";
-import { readFile as readFile13, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join12 } from "node:path";
+import { readFile as readFile14, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join13 } from "node:path";
 
 // ../domain/src/quota.ts
 var QUOTA_EVERY_MS = 5 * 6e4;
@@ -2434,7 +2516,7 @@ var OFF_BACKOFF_MS = 60 * 6e4;
 var OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
 var read2 = async (path) => {
   try {
-    return JSON.parse(await readFile13(path, "utf8"));
+    return JSON.parse(await readFile14(path, "utf8"));
   } catch {
     return null;
   }
@@ -2444,20 +2526,20 @@ var left = (value) => typeof value === "number" ? `${Math.round(value)}%` : "?";
 async function recordStatusline(dir, raw, now, env = process.env) {
   const readings = claudeReadings(raw, accountLabel(env));
   if (!readings.length) return "";
-  await writeFile3(join12(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
+  await writeFile3(join13(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
   const five = readings.find((row) => row.window === "five_hour");
   const seven = readings.find((row) => row.window === "seven_day");
   return `5h ${left(five?.used_pct)} \xB7 7d ${left(seven?.used_pct)}`;
 }
 async function postDue(dir, now) {
-  const state = await read2(join12(dir, QUOTA_STATE));
+  const state = await read2(join13(dir, QUOTA_STATE));
   if (!state) return true;
   if (state.off_until && now < state.off_until) return false;
   return now - state.sent_at >= QUOTA_EVERY_MS;
 }
 async function collect(dir, env, fetcher = fetch) {
   const out = [];
-  const local = await read2(join12(dir, QUOTA_FILE));
+  const local = await read2(join13(dir, QUOTA_FILE));
   if (local?.readings) out.push(...local.readings);
   const key = env.COMMONRIG_OPENROUTER_KEY ?? env.OPENROUTER_API_KEY;
   if (key) {
@@ -2475,7 +2557,7 @@ async function postQuota(dir, now, call, env = process.env, fetcher = fetch, for
   if (!readings.length) return "nothing to send";
   const said2 = JSON.parse(await call(readings));
   const off = said2.on === false;
-  await writeFile3(join12(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
+  await writeFile3(join13(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
   return off ? "off" : "sent";
 }
 function postBehind(dir) {
@@ -2485,11 +2567,11 @@ function postBehind(dir) {
 }
 
 // src/cli.ts
-import { mkdir as mkdir6 } from "node:fs/promises";
+import { mkdir as mkdir7 } from "node:fs/promises";
 
 // src/track.ts
-import { mkdir as mkdir4, readFile as readFile14, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join13 } from "node:path";
+import { mkdir as mkdir5, readFile as readFile15, writeFile as writeFile4 } from "node:fs/promises";
+import { join as join14 } from "node:path";
 var SESSION_ID2 = /^[\w.:-]{1,128}$/;
 var MARKS = "track-asked.json";
 var MAX_MARKS = 200;
@@ -2500,7 +2582,7 @@ function askLine(counts) {
 }
 async function readMarks(dir) {
   try {
-    const parsed = JSON.parse(await readFile14(join13(dir, MARKS), "utf8"));
+    const parsed = JSON.parse(await readFile15(join14(dir, MARKS), "utf8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
@@ -2508,8 +2590,8 @@ async function readMarks(dir) {
 }
 async function writeMarks(dir, marks) {
   const kept = Object.entries(marks).slice(-MAX_MARKS);
-  await mkdir4(dir, { recursive: true });
-  await writeFile4(join13(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
+  await mkdir5(dir, { recursive: true });
+  await writeFile4(join14(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
 }
 async function handleTrack(mode, input, deps) {
   const session = typeof input.session_id === "string" && SESSION_ID2.test(input.session_id) ? input.session_id : null;
@@ -2532,12 +2614,12 @@ async function handleTrack(mode, input, deps) {
 var RELEASE_KEYS = ["MCowBQYDK2VwAyEAi8y0ShXULz6qfSv9l7mpyj8fZqgZO1b00YJwYg6Yozc="];
 
 // src/where.ts
-import { mkdir as mkdir5, readFile as readFile15, realpath, rm as rm8, writeFile as writeFile5 } from "node:fs/promises";
-import { basename, dirname as dirname2, join as join14, resolve as resolve2 } from "node:path";
+import { mkdir as mkdir6, readFile as readFile16, realpath, rm as rm9, writeFile as writeFile5 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join15, resolve as resolve2 } from "node:path";
 
 // src/release.ts
-import { createHash as createHash3, createPublicKey, verify } from "node:crypto";
-var releaseDigest = (bytes) => createHash3("sha256").update(Buffer.from(bytes).toString("latin1").replace(/\r\n/g, "\n"), "latin1").digest("hex");
+import { createHash as createHash4, createPublicKey, verify } from "node:crypto";
+var releaseDigest = (bytes) => createHash4("sha256").update(Buffer.from(bytes).toString("latin1").replace(/\r\n/g, "\n"), "latin1").digest("hex");
 function parseManifest(text) {
   try {
     const value = JSON.parse(text);
@@ -2573,12 +2655,12 @@ function checkRelease(keys, manifestText, bundle, signature) {
 // src/where.ts
 var WHERE_FILE = "helper.json";
 var WHERE_KEPT_FILE = "where-kept.json";
-var read3 = (path) => readFile15(path).catch(() => null);
+var read3 = (path) => readFile16(path).catch(() => null);
 async function launcherProblem(launcher, keys) {
   if (!launcher) return "no launcher path";
   if (keys.length === 0) return "not a signed release: no release key pinned";
   const here = dirname2(launcher);
-  const manifestText = (await read3(join14(here, "release.json")))?.toString("utf8") ?? null;
+  const manifestText = (await read3(join15(here, "release.json")))?.toString("utf8") ?? null;
   let bundle = null;
   let files = {};
   try {
@@ -2587,7 +2669,7 @@ async function launcherProblem(launcher, keys) {
     if (parsed?.files && typeof parsed.files === "object") files = parsed.files;
   } catch {
   }
-  const check = checkRelease(keys, manifestText, bundle ? await read3(join14(here, bundle)) : null, (await read3(join14(here, "release.sig")))?.toString("utf8") ?? null);
+  const check = checkRelease(keys, manifestText, bundle ? await read3(join15(here, bundle)) : null, (await read3(join15(here, "release.sig")))?.toString("utf8") ?? null);
   if (!check.ok) return `not a signed release: ${check.reason}`;
   const name = basename(launcher);
   if (name === check.manifest.bundle || typeof files[name] !== "string") return "not run through a release launcher";
@@ -2605,22 +2687,22 @@ async function noteWhere(args) {
   const problem = await launcherProblem(launcher, args.keys);
   const why = problem ?? ((await readCredentials(args.data))?.refresh_token ? null : `not signed in here (${args.data})`);
   if (why) {
-    await mkdir5(args.data, { recursive: true }).then(() => writeFile5(join14(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
+    await mkdir6(args.data, { recursive: true }).then(() => writeFile5(join15(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
     return { wrote: false, why };
   }
   const text = JSON.stringify({ path: launcher, data: args.data });
-  const file = join14(args.home, WHERE_FILE);
-  if (await readFile15(file, "utf8").catch(() => null) !== text) {
-    await mkdir5(args.home, { recursive: true });
+  const file = join15(args.home, WHERE_FILE);
+  if (await readFile16(file, "utf8").catch(() => null) !== text) {
+    await mkdir6(args.home, { recursive: true });
     await writeAtomic(file, text);
   }
-  await rm8(join14(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
+  await rm9(join15(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
   return { wrote: true };
 }
 async function whereStatus(home, data) {
   let named;
   try {
-    named = JSON.parse(await readFile15(join14(home, WHERE_FILE), "utf8")).data;
+    named = JSON.parse(await readFile16(join15(home, WHERE_FILE), "utf8")).data;
   } catch {
     return { helper_json: "missing", kept_why: await keptWhy(data) };
   }
@@ -2630,7 +2712,7 @@ async function whereStatus(home, data) {
 }
 async function keptWhy(data) {
   try {
-    const value = JSON.parse(await readFile15(join14(data, WHERE_KEPT_FILE), "utf8")).why;
+    const value = JSON.parse(await readFile16(join15(data, WHERE_KEPT_FILE), "utf8")).why;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
@@ -2641,7 +2723,7 @@ async function keptWhy(data) {
 var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
-var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join15(homedir3(), ".commonrig");
+var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join16(homedir3(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
   if (!held?.refresh_token) return null;
@@ -2662,7 +2744,7 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
-var laneDir = () => process.env.COMMONRIG_LANE_DIR || join15(homedir3(), ".commonrig-lane");
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join16(homedir3(), ".commonrig-lane");
 function machineAsks(primary, args, runnerExtra = {}) {
   const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
   const asks = [];
@@ -2721,7 +2803,7 @@ ${authorizeUrl}`);
 }
 async function runRaise(flags2) {
   const dir = intakeDir();
-  await mkdir6(dir, { recursive: true, mode: 448 });
+  await mkdir7(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   if (action === "connect") {
     const noBrowser = rest.includes("--no-browser");
@@ -2783,7 +2865,7 @@ ${args}`);
 var RUNNER_USAGE = "usage: helper runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url> [--project <p>] [--flagged] [--harness claude|codex|opencode|custom] [--no-browser] [--loopback] | runner disconnect";
 async function runRunner(flags2) {
   const dir = runnerDir();
-  await mkdir6(dir, { recursive: true, mode: 448 });
+  await mkdir7(dir, { recursive: true, mode: 448 });
   const [action, ...rest] = flags2;
   const value = (list, name) => flagValues(list, name).at(-1);
   if (action === "connect") {
@@ -2862,7 +2944,7 @@ async function readStdin() {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-var noteWhere2 = () => noteWhere({ home: join15(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
+var noteWhere2 = () => noteWhere({ home: join16(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
 async function runTrack(mode) {
   try {
     const input = JSON.parse(await readStdin());
@@ -2979,7 +3061,7 @@ async function runNeverSend(dir, args) {
     await writeNeverSend(dir, { ...read4, mode: rest[0] });
     console.log(rest[0] === "drop" ? "never-send: a prompt or reply with a listed word stays on this machine" : "never-send: listed words are swapped for [withheld] before anything is sent");
   } else if (action === "list") {
-    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join15(dir, "never-send.json") }));
+    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join16(dir, "never-send.json") }));
   } else {
     console.log('usage: helper never-send add <word or "a phrase"...> | remove <word...> | mode drop|mask | list');
     process.exitCode = 2;
@@ -2997,7 +3079,7 @@ async function runNames(dir, flags2) {
     if (!kept) return;
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
-    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join15(dir, NAMES_FILE)}`);
+    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join16(dir, NAMES_FILE)}`);
   } else if (!action || action === "list") {
     const names = await readNames(dir);
     console.log(names === null ? `${NAMES_FILE} could not be read, so every prompt counts as naming one` : names.length ? names.join("\n") : "no private names on this machine");
@@ -3043,7 +3125,7 @@ async function runCommand2(command2, flags2) {
   } else if (command2 === "status") {
     const list = await readNeverSend(dir);
     const neverSend = list === "unreadable" ? "unreadable: holding everything back" : { mode: list.mode, words: list.words.length };
-    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join15(homedir3(), ".commonrig"), dir) }));
+    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join16(homedir3(), ".commonrig"), dir) }));
   } else if (command2 === "names") {
     await runNames(dir, flags2);
   } else if (command2 === "quota") {

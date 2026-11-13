@@ -9,6 +9,9 @@
     "PreToolUse": [
       { "matcher": "^mcp__.*commonrig.*__start$", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "timeout": 5 }] }
     ],
+    "PostToolUse": [
+      { "matcher": "^mcp__.*commonrig.*__start$", "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "async": true }] }
+    ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "async": true }] }
     ]
