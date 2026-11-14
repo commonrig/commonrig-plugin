@@ -548,6 +548,31 @@ var flagValues = (flags2, name) => flags2.flatMap((flag2, index) => flag2 === na
 // src/hook.ts
 import { execFile as execFile3 } from "node:child_process";
 import { createHash as createHash3, createHmac as createHmac3, randomBytes as randomBytes2 } from "node:crypto";
+
+// ../domain/src/repos.ts
+var MAX_REMOTE = 300;
+function normaliseRemote(url) {
+  return url.replace(/^[a-z+]+:\/\//i, "").replace(/^[^/@]*@/, "").replace(/:\d+(?=\/)/, "").replace(/:(?=[^/\d])/, "/").replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase();
+}
+var SCHEME = /^(https?|ssh|git|git\+ssh):\/\/[^\s/]+\/\S+$/i;
+var SCP = /^(?:[\w.-]+@)?[\w.-]{2,}:(?!\/\/)\S+$/;
+function cleanRemote(raw) {
+  if (typeof raw !== "string") return null;
+  const url = raw.trim();
+  if (!url || url.length > MAX_REMOTE || url.includes("\\")) return null;
+  if (/^(?:file:|[a-z]:|[/~.])/i.test(url)) return null;
+  const schemed = /^[a-z+]+:\/\//i.test(url);
+  const authority = url.replace(/^[a-z+]+:\/\//i, "").split("/")[0] ?? "";
+  if ((authority.match(/@/g) ?? []).length > 1) return null;
+  if (!schemed && /^[^:]+:\d+\//.test(url)) return null;
+  const login = /^([a-z+]+:\/\/)?([^/@]*)@/i.exec(url);
+  const cleaned = login && login[2] !== "git" ? url.replace(/^([a-z+]+:\/\/)?[^/@]*@/i, "$1") : url;
+  if (!SCHEME.test(cleaned) && !SCP.test(cleaned)) return null;
+  const key = normaliseRemote(cleaned);
+  return /^[^/]+\/[^/]/.test(key) ? cleaned : null;
+}
+
+// src/hook.ts
 import { mkdir as mkdir3, readdir as readdir2, readFile as readFile8, rm as rm6, stat as stat4 } from "node:fs/promises";
 import { join as join8 } from "node:path";
 
@@ -1741,7 +1766,7 @@ var git = (cwd, args) => new Promise((resolve3) => {
 });
 var gitRemote = (cwd) => git(cwd, ["remote", "get-url", "origin"]);
 var gitRoot = (cwd) => git(cwd, ["rev-parse", "--show-toplevel"]);
-function normaliseRemote(url) {
+function normaliseRemote2(url) {
   return url.replace(/^[a-z+]+:\/\//i, "").replace(/^[^/@]*@/, "").replace(/:\d+(?=\/)/, "").replace(/:(?=[^/\d])/, "/").replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase();
 }
 var sessionFile = (dir, session) => join8(dir, "sessions", `${createHash3("sha256").update(session).digest("hex").slice(0, 32)}.json`);
@@ -1769,7 +1794,7 @@ function ancestors(path) {
 }
 async function repoKeys(cwd, key, remote = gitRemote, root = gitRoot) {
   const [url, top] = cwd ? await Promise.all([remote(cwd), root(cwd)]) : [null, null];
-  const repoHash = url ? createHash3("sha256").update(normaliseRemote(url)).digest("hex") : null;
+  const repoHash = url ? createHash3("sha256").update(normaliseRemote2(url)).digest("hex") : null;
   const hashed = repoHash ? [repoHash] : [];
   return { repoHash, pin: [...hashed, pathKey(top ?? cwd, key)], candidates: [...hashed, ...ancestors(cwd).map((path) => pathKey(path, key))] };
 }
@@ -1868,17 +1893,49 @@ ${instructions}` : ""}`
 }
 var START_TOOL = /^mcp__[\w-]*commonrig[\w-]*__start$/;
 var AGENT_ID = /^[\w.-]{1,64}$/;
-function startInput(input, session, held = null) {
+function startInput(input, session, held = null, place = {}) {
   const tool = input.tool_input;
   if (!START_TOOL.test(str2(input.tool_name) ?? "") || !tool || typeof tool !== "object" || Array.isArray(tool)) return null;
   const agent = str2(input.agent_id);
-  const updatedInput = { ...tool, client_session: session, ...agent && AGENT_ID.test(agent) ? { subagent: agent } : {}, ...held && !agent ? { instructions_cached: held } : {} };
+  const updatedInput = { ...tool, ...place, client_session: session, ...agent && AGENT_ID.test(agent) ? { subagent: agent } : {}, ...held && !agent ? { instructions_cached: held } : {} };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } });
 }
+async function startPlace(input, deps) {
+  const tool = input.tool_input;
+  const cwd = str2(input.cwd);
+  if (!cwd || !tool || typeof tool !== "object" || Array.isArray(tool)) return {};
+  const needRepo = !str2(tool.repo);
+  const needFolder = !str2(tool.folder);
+  if (!needRepo && !needFolder) return {};
+  let url = null;
+  const remote = async (dir) => url = await (deps.remote ?? gitRemote)(dir);
+  const { candidates } = await repoKeys(cwd, await installKey(deps.dataDir), remote, deps.root);
+  if (await isPaused(deps.dataDir, candidates, deps.now())) return {};
+  const list = await readNeverSend(deps.dataDir);
+  const clean = (value) => {
+    if (!value) return null;
+    const screened = screen(value, list);
+    return screened.keep && screened.text === value ? value : null;
+  };
+  const remoteOk = (value) => value && !/[?#]/.test(value) ? value : null;
+  const repo = needRepo ? clean(remoteOk(cleanRemote(url))) : null;
+  const folder = needFolder && cwd.length <= 512 ? clean(cwd) : null;
+  if (repo && await namesPrivate(deps.dataDir, repo) || folder && await namesPrivate(deps.dataDir, folder)) return {};
+  return { ...repo ? { repo } : {}, ...folder ? { folder } : {} };
+}
+var PLACE_WAIT_MS = 2e3;
+var placeInTime = (input, deps) => Promise.race([
+  startPlace(input, deps).catch(() => ({})),
+  new Promise((resolve3) => setTimeout(() => resolve3({}), PLACE_WAIT_MS).unref())
+]);
 async function handleHook(input, deps) {
   const session = str2(input.session_id);
   const event = str2(input.hook_event_name);
-  if (event === "PreToolUse") return session && SESSION_ID.test(session) ? startInput(input, session, START_TOOL.test(str2(input.tool_name) ?? "") ? (await readSession(deps.dataDir, session).catch(() => ({}))).instructions ?? null : null) : null;
+  if (event === "PreToolUse") {
+    if (!session || !SESSION_ID.test(session) || !START_TOOL.test(str2(input.tool_name) ?? "")) return null;
+    const held = (await readSession(deps.dataDir, session).catch(() => ({}))).instructions ?? null;
+    return startInput(input, session, held, await placeInTime(input, deps));
+  }
   if (event === "PostToolUse") {
     const cwd = str2(input.cwd);
     if (cwd && START_TOOL.test(str2(input.tool_name) ?? "")) await noteServed(deps.dataDir, cwd, input.tool_response, deps.now()).catch(() => void 0);
