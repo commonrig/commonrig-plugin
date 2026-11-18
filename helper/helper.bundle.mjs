@@ -1,7 +1,7 @@
 // src/cli.ts
 import { spawn as spawn3 } from "node:child_process";
 import { homedir as homedir3, hostname as hostname2 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
@@ -581,8 +581,8 @@ function cleanRemote(raw) {
 }
 
 // src/hook.ts
-import { mkdir as mkdir3, readdir as readdir2, readFile as readFile8, rm as rm6, stat as stat4 } from "node:fs/promises";
-import { join as join8 } from "node:path";
+import { mkdir as mkdir3, readdir as readdir3, readFile as readFile8, rm as rm6, stat as stat4 } from "node:fs/promises";
+import { join as join9 } from "node:path";
 
 // src/capture.ts
 import { createHmac as createHmac2 } from "node:crypto";
@@ -1529,51 +1529,83 @@ async function spoolStatus(dir) {
 
 // src/usage.ts
 import { createReadStream } from "node:fs";
-import { stat as stat3 } from "node:fs/promises";
+import { readdir as readdir2, stat as stat3 } from "node:fs/promises";
+import { join as join7 } from "node:path";
 import { createInterface } from "node:readline";
 var IDLE_GAP_MS = 5 * 6e4;
 var MAX_LOG_BYTES = 512 * 1024 * 1024;
 var MAX_MODELS = 12;
+var MAX_SUBAGENT_LOGS = 400;
+var MAX_SUBAGENT_BYTES = 1024 * 1024 * 1024;
 var MODEL = /^[\w.:[\]-]{1,64}$/;
 var STAMP = /"timestamp":"([^"]{10,40})"/;
 var num = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
-async function readUsage(path, session) {
-  if (typeof path !== "string" || !path.endsWith(".jsonl")) return null;
+var sizeOk = async (path) => {
   const size = await stat3(path).then((info) => info.isFile() ? info.size : -1, () => -1);
-  if (size < 0 || size > MAX_LOG_BYTES) return null;
-  const messages = /* @__PURE__ */ new Map();
-  let first = null;
-  let last = null;
-  let active = 0;
+  return size >= 0 && size <= MAX_LOG_BYTES;
+};
+async function readClaudeLog(path, messages, minutes) {
   const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
+  for await (const line of lines) {
+    if (minutes) {
       const stamp = STAMP.exec(line)?.[1];
       const at = stamp ? Date.parse(stamp) : Number.NaN;
       if (Number.isFinite(at)) {
-        if (last !== null && at > last) active += Math.min(at - last, IDLE_GAP_MS);
-        if (first === null || at < first) first = at;
-        if (last === null || at > last) last = at;
+        if (minutes.last !== null && at > minutes.last) minutes.active += Math.min(at - minutes.last, IDLE_GAP_MS);
+        if (minutes.first === null || at < minutes.first) minutes.first = at;
+        if (minutes.last === null || at > minutes.last) minutes.last = at;
       }
-      if (!line.includes('"usage"')) continue;
-      let entry;
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const message = entry?.type === "assistant" ? entry.message : void 0;
-      const model = typeof message?.model === "string" && MODEL.test(message.model) && !message.model.startsWith("<") ? message.model : null;
-      if (!message?.usage || !model) continue;
-      const id = typeof message.id === "string" ? message.id : `line:${messages.size}`;
-      const usage = message.usage;
-      const counted = { model, input: num(usage.input_tokens), output: num(usage.output_tokens), cache_read: num(usage.cache_read_input_tokens), cache_write: num(usage.cache_creation_input_tokens) };
-      const held = messages.get(id);
-      messages.set(id, held ? { model, input: Math.max(held.input, counted.input), output: Math.max(held.output, counted.output), cache_read: Math.max(held.cache_read, counted.cache_read), cache_write: Math.max(held.cache_write, counted.cache_write) } : counted);
     }
+    if (!line.includes('"usage"')) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const message = entry?.type === "assistant" ? entry.message : void 0;
+    const model = typeof message?.model === "string" && MODEL.test(message.model) && !message.model.startsWith("<") ? message.model : null;
+    if (!message?.usage || !model) continue;
+    const id = typeof message.id === "string" ? message.id : `line:${messages.size}`;
+    const usage = message.usage;
+    const counted = { model, input: num(usage.input_tokens), output: num(usage.output_tokens), cache_read: num(usage.cache_read_input_tokens), cache_write: num(usage.cache_creation_input_tokens) };
+    const held = messages.get(id);
+    messages.set(id, held ? { model, input: Math.max(held.input, counted.input), output: Math.max(held.output, counted.output), cache_read: Math.max(held.cache_read, counted.cache_read), cache_write: Math.max(held.cache_write, counted.cache_write) } : counted);
+  }
+}
+async function subagentLogs(path, cap = MAX_SUBAGENT_LOGS, budget = MAX_SUBAGENT_BYTES) {
+  const dir = join7(path.slice(0, -".jsonl".length), "subagents");
+  const names = (await readdir2(dir).catch(() => [])).filter((name) => name.endsWith(".jsonl"));
+  const files = [];
+  for (const name of names) {
+    const info = await stat3(join7(dir, name)).catch(() => null);
+    if (info?.isFile() && info.size <= MAX_LOG_BYTES) files.push({ path: join7(dir, name), at: info.birthtimeMs || info.mtimeMs, size: info.size });
+  }
+  files.sort((a, b) => a.at - b.at || a.path.localeCompare(b.path));
+  const kept = [];
+  let bytes = 0;
+  for (const file of files) {
+    if (kept.length >= cap || bytes + file.size > budget) break;
+    bytes += file.size;
+    kept.push(file.path);
+  }
+  return kept;
+}
+function parentLog(path) {
+  const match = /^(.*)[\\/]subagents[\\/][^\\/]+\.jsonl$/.exec(path);
+  return match ? `${match[1]}.jsonl` : path;
+}
+async function readUsage(path, session) {
+  if (typeof path !== "string" || !path.endsWith(".jsonl")) return null;
+  if (!await sizeOk(path)) return null;
+  const messages = /* @__PURE__ */ new Map();
+  const minutes = { first: null, last: null, active: 0 };
+  try {
+    await readClaudeLog(path, messages, minutes);
   } catch {
     return null;
   }
+  for (const sub of await subagentLogs(path)) await readClaudeLog(sub, messages, null).catch(() => void 0);
   const byModel = /* @__PURE__ */ new Map();
   for (const message of messages.values()) {
     const sum = byModel.get(message.model) ?? { model: message.model, input: 0, output: 0, cache_read: 0, cache_write: 0 };
@@ -1587,9 +1619,9 @@ async function readUsage(path, session) {
   if (!models.length) return null;
   return {
     client_session: session,
-    active_minutes: Math.round(active / 6e4),
-    wall_minutes: first !== null && last !== null ? Math.round((last - first) / 6e4) : 0,
-    started: first,
+    active_minutes: Math.round(minutes.active / 6e4),
+    wall_minutes: minutes.first !== null && minutes.last !== null ? Math.round((minutes.last - minutes.first) / 6e4) : 0,
+    started: minutes.first,
     models
   };
 }
@@ -1609,8 +1641,7 @@ var rise = (now, before) => ({
 var goodModel = (value) => typeof value === "string" && MODEL.test(value) && !value.startsWith("<") ? value : null;
 async function readCodexUsage(path, session, hookModel = null) {
   if (typeof path !== "string" || !path.endsWith(".jsonl")) return null;
-  const size = await stat3(path).then((info) => info.isFile() ? info.size : -1, () => -1);
-  if (size < 0 || size > MAX_LOG_BYTES) return null;
+  if (!await sizeOk(path)) return null;
   const fallback = goodModel(hookModel) ?? "codex";
   const turnModels = /* @__PURE__ */ new Map();
   const records = /* @__PURE__ */ new Map();
@@ -1681,7 +1712,7 @@ async function readCodexUsage(path, session, hookModel = null) {
 // src/instructions-cache.ts
 import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile7, rm as rm5 } from "node:fs/promises";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 var HOOK_ROOM = 9900;
 var SESSION_ROOM = 500;
 var PATH_ROOM = 260;
@@ -1712,7 +1743,7 @@ var folderKey2 = (cwd, owner) => {
   return createHash2("sha256").update(`${owner}
 ${path}`).digest("hex");
 };
-var fileFor = (dataDir2, cwd, owner) => join7(dataDir2, "instructions", `${folderKey2(cwd, owner)}.json`);
+var fileFor = (dataDir2, cwd, owner) => join8(dataDir2, "instructions", `${folderKey2(cwd, owner)}.json`);
 function replyText(response) {
   if (typeof response === "string") return response;
   const list = Array.isArray(response) ? response : typeof response === "object" && response !== null && Array.isArray(response.content) ? response.content : null;
@@ -1744,7 +1775,7 @@ async function noteServed(dataDir2, cwd, response, now) {
     return;
   }
   if (!served.block) return;
-  await mkdir2(join7(dataDir2, "instructions"), { recursive: true, mode: 448 });
+  await mkdir2(join8(dataDir2, "instructions"), { recursive: true, mode: 448 });
   await writeAtomic(file, JSON.stringify({ key: served.key, block: served.block, at: now, owner }));
 }
 async function cachedFor(dataDir2, cwd) {
@@ -1812,8 +1843,8 @@ var shaped = (value, shape) => {
   return text && shape.test(text) ? text : null;
 };
 async function installKey(dir) {
-  await mkdir3(join8(dir, "sessions"), { recursive: true, mode: 448 });
-  const file = join8(dir, "install.key");
+  await mkdir3(join9(dir, "sessions"), { recursive: true, mode: 448 });
+  const file = join9(dir, "install.key");
   const existing = await readFile8(file, "utf8").catch(() => "");
   if (INSTALL_KEY.test(existing)) return existing;
   await writeAtomic(file, randomBytes2(32).toString("hex"));
@@ -1827,16 +1858,16 @@ var gitRoot = (cwd) => git(cwd, ["rev-parse", "--show-toplevel"]);
 function normaliseRemote2(url) {
   return url.replace(/^[a-z+]+:\/\//i, "").replace(/^[^/@]*@/, "").replace(/:\d+(?=\/)/, "").replace(/:(?=[^/\d])/, "/").replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase();
 }
-var sessionFile = (dir, session) => join8(dir, "sessions", `${createHash3("sha256").update(session).digest("hex").slice(0, 32)}.json`);
+var sessionFile = (dir, session) => join9(dir, "sessions", `${createHash3("sha256").update(session).digest("hex").slice(0, 32)}.json`);
 async function readSession(dir, session) {
   const parsed = await readFile8(sessionFile(dir, session), "utf8").then((text) => JSON.parse(text), () => null);
   return typeof parsed === "object" && parsed ? parsed : {};
 }
 var writeSession = (dir, session, state) => writeAtomic(sessionFile(dir, session), JSON.stringify(state));
 async function pruneSessions(dir, now) {
-  const folder = join8(dir, "sessions");
-  for (const name of await readdir2(folder)) {
-    const file = join8(folder, name);
+  const folder = join9(dir, "sessions");
+  for (const name of await readdir3(folder)) {
+    const file = join9(folder, name);
     const modified = await stat4(file).then((info) => info.mtimeMs, () => now);
     if (now - modified > SESSION_MAX_AGE_MS) await rm6(file, { force: true }).catch(() => void 0);
   }
@@ -1923,7 +1954,11 @@ async function onStop(input, session, key, deps) {
     const crons = input.session_crons.flatMap((cron) => typeof cron?.prompt === "string" ? [cronMark(cron.prompt, key)] : []);
     await writeSession(dataDir2, session, { ...state, crons });
   }
-  if (input.agent_id) return recordDrop(dataDir2, "subagent");
+  if (input.agent_id) {
+    const path = str2(input.transcript_path);
+    if (path) await spoolTotals({ ...input, transcript_path: parentLog(path) }, session, state, key, deps).catch(() => recordDrop(dataDir2, "usage_error"));
+    return recordDrop(dataDir2, "subagent");
+  }
   await spoolTotals(input, session, state, key, deps).catch(() => recordDrop(dataDir2, "usage_error"));
   const reply = str2(input.last_assistant_message);
   if (!reply) return;
@@ -2042,7 +2077,7 @@ import { execFile as execFile4 } from "node:child_process";
 import { randomBytes as randomBytes3 } from "node:crypto";
 import { readFile as readFile9, rm as rm7 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join9 } from "node:path";
+import { join as join10 } from "node:path";
 var LINK = /^\/up\/ws_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]{43}$/;
 function linkProblem(link, signedInTo) {
   let url;
@@ -2078,7 +2113,7 @@ async function webpOf(file, bytes, run2 = runCommand) {
   if (!TO_WEBP.test(file)) return { bytes, note: "" };
   let found = false;
   for (const converter of CONVERTERS) {
-    const output = join9(tmpdir(), `cr-put-${randomBytes3(6).toString("hex")}.webp`);
+    const output = join10(tmpdir(), `cr-put-${randomBytes3(6).toString("hex")}.webp`);
     try {
       const ran = await run2(converter.cmd, converter.args(file, output));
       if (ran === "missing") continue;
@@ -2146,13 +2181,13 @@ async function decideArgs(flags2) {
 // src/raise.ts
 import { readFile as readFile11 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 var INTAKE_SCOPE = "intake:write offline_access";
 var KINDS = ["bug", "finding", "task"];
 var MAX_BODY_BYTES = 2e4;
 var MAX_REPORT_BYTES = 6e4;
 var TIMEOUT_MS = 1e4;
-var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join10(homedir(), ".commonrig-intake");
+var intakeDir = () => process.env.COMMONRIG_INTAKE_DIR || join11(homedir(), ".commonrig-intake");
 var one = (flags2, name) => flagValues(flags2, name).at(-1);
 async function raiseArgs(flags2, read4 = readFile11) {
   const title = one(flags2, "--title")?.trim();
@@ -2219,13 +2254,13 @@ async function callIntake(dir, tool, args, fetcher) {
 
 // src/runner-adapters.ts
 import { readFile as readFile12 } from "node:fs/promises";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 var RUNNER_HARNESSES = ["claude", "codex", "opencode", "custom"];
 async function runnerCommand(harness, dir) {
   if (harness === "claude") return { command: "claude", args: ["-p"] };
   if (harness === "codex") return { command: "codex", args: ["exec", "-"] };
   if (harness === "opencode") return { command: "opencode", args: ["run"] };
-  const config = JSON.parse(await readFile12(join11(dir, "executor.json"), "utf8"));
+  const config = JSON.parse(await readFile12(join12(dir, "executor.json"), "utf8"));
   if (!config || typeof config !== "object") throw new Error("executor.json must contain command and args");
   const { command: command2, args } = config;
   if (typeof command2 !== "string" || !command2.trim() || command2.includes("\0") || !Array.isArray(args) || !args.every((arg) => typeof arg === "string" && !arg.includes("\0"))) throw new Error("executor.json must contain a command and an array of string arguments");
@@ -2236,7 +2271,7 @@ async function runnerCommand(harness, dir) {
 import { spawn } from "node:child_process";
 import { mkdir as mkdir4, readFile as readFile13, rename as rename3, rm as rm8, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import { dirname, join as join12, resolve, sep } from "node:path";
+import { dirname, join as join13, resolve, sep } from "node:path";
 
 // ../domain/src/export-tree.ts
 var TITLES = {
@@ -2378,8 +2413,8 @@ var RUNNER_POLL_MS = 2 * 60 * 1e3;
 var TIMEOUT_MS2 = 15e3;
 var SUMMARY_CHARS = 1500;
 var RUN_LIMIT_MS = 2 * 60 * 60 * 1e3;
-var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join12(homedir2(), ".commonrig-runner");
-var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join12(dir, "export");
+var runnerDir = () => process.env.COMMONRIG_RUNNER_DIR || join13(homedir2(), ".commonrig-runner");
+var exportDir = (dir) => process.env.COMMONRIG_EXPORT_DIR || join13(dir, "export");
 var MAX_PAGES = 1e4;
 async function runnerCall(dir, name, args, fetcher = fetch) {
   const held = await readCredentials(dir);
@@ -2487,15 +2522,15 @@ async function readLinks(links, read4 = readLink) {
 var summaryOf = (tail) => maskSecrets(tail.trim().slice(-SUMMARY_CHARS));
 async function readPrompted(dir) {
   try {
-    return new Set(JSON.parse(await readFile13(join12(dir, "prompted.json"), "utf8")));
+    return new Set(JSON.parse(await readFile13(join13(dir, "prompted.json"), "utf8")));
   } catch {
     return /* @__PURE__ */ new Set();
   }
 }
 async function writeBrief(dir, record) {
-  const folder = join12(dir, "briefs");
+  const folder = join13(dir, "briefs");
   await mkdir4(folder, { recursive: true, mode: 448 });
-  const path = join12(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
+  const path = join13(folder, `${record.id.replace(/[^\w-]/g, "_")}.md`);
   await writeFile2(path, record.brief, { mode: 384 });
   return path;
 }
@@ -2600,14 +2635,14 @@ async function runnerOnce(dir, allowed, io) {
     prompted.add(record.id);
     if (io.ask && harness && await io.ask(`  run ${record.id} with ${harness} now? [y/N] `)) await execute(dir, reply.handle, harness, record, io);
   }
-  await writeFile2(join12(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
+  await writeFile2(join13(dir, "prompted.json"), JSON.stringify([...prompted].slice(-200)), { mode: 384 }).catch(() => void 0);
   return reply.due.length;
 }
 
 // src/quota.ts
 import { spawn as spawn2 } from "node:child_process";
 import { readFile as readFile14, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 
 // ../domain/src/quota.ts
 var QUOTA_EVERY_MS = 5 * 6e4;
@@ -2639,6 +2674,13 @@ function openRouterReadings(body, account = "main") {
   if (left2 === null && usage === null) return [];
   return [{ source: "openrouter", window: "credit", account, credit_left: left2, usage }];
 }
+var DEFAULT_QUOTA_POLICY = [
+  "Task fit and speed first: pick the model the job needs. Quota only breaks a tie.",
+  "Between accounts that fit alike, spend where there is most room: burn headroom that resets soon, then use roomy accounts, and hold the tight ones.",
+  "Never dip into the interactive reserve: what is kept for hands-on sessions is not for automation.",
+  "A quota reading older than an hour is unknown, not room to spend.",
+  "Codex is optional: use it where it fits and has room. Nothing depends on it."
+].join("\n");
 
 // src/quota.ts
 var QUOTA_FILE = "quota-claude.json";
@@ -2657,20 +2699,20 @@ var left = (value) => typeof value === "number" ? `${Math.round(value)}%` : "?";
 async function recordStatusline(dir, raw, now, env = process.env) {
   const readings = claudeReadings(raw, accountLabel(env));
   if (!readings.length) return "";
-  await writeFile3(join13(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
+  await writeFile3(join14(dir, QUOTA_FILE), JSON.stringify({ at: now, readings }));
   const five = readings.find((row) => row.window === "five_hour");
   const seven = readings.find((row) => row.window === "seven_day");
   return `5h ${left(five?.used_pct)} \xB7 7d ${left(seven?.used_pct)}`;
 }
 async function postDue(dir, now) {
-  const state = await read2(join13(dir, QUOTA_STATE));
+  const state = await read2(join14(dir, QUOTA_STATE));
   if (!state) return true;
   if (state.off_until && now < state.off_until) return false;
   return now - state.sent_at >= QUOTA_EVERY_MS;
 }
 async function collect(dir, env, fetcher = fetch) {
   const out = [];
-  const local = await read2(join13(dir, QUOTA_FILE));
+  const local = await read2(join14(dir, QUOTA_FILE));
   if (local?.readings) out.push(...local.readings);
   const key = env.COMMONRIG_OPENROUTER_KEY ?? env.OPENROUTER_API_KEY;
   if (key) {
@@ -2688,7 +2730,7 @@ async function postQuota(dir, now, call, env = process.env, fetcher = fetch, for
   if (!readings.length) return "nothing to send";
   const said2 = JSON.parse(await call(readings));
   const off = said2.on === false;
-  await writeFile3(join13(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
+  await writeFile3(join14(dir, QUOTA_STATE), JSON.stringify({ sent_at: now, ...off ? { off_until: now + OFF_BACKOFF_MS } : {} }));
   return off ? "off" : "sent";
 }
 function postBehind(dir) {
@@ -2702,7 +2744,7 @@ import { mkdir as mkdir7 } from "node:fs/promises";
 
 // src/track.ts
 import { mkdir as mkdir5, readFile as readFile15, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 var SESSION_ID2 = /^[\w.:-]{1,128}$/;
 var MARKS = "track-asked.json";
 var MAX_MARKS = 200;
@@ -2713,7 +2755,7 @@ function askLine(counts) {
 }
 async function readMarks(dir) {
   try {
-    const parsed = JSON.parse(await readFile15(join14(dir, MARKS), "utf8"));
+    const parsed = JSON.parse(await readFile15(join15(dir, MARKS), "utf8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
@@ -2722,7 +2764,7 @@ async function readMarks(dir) {
 async function writeMarks(dir, marks) {
   const kept = Object.entries(marks).slice(-MAX_MARKS);
   await mkdir5(dir, { recursive: true });
-  await writeFile4(join14(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
+  await writeFile4(join15(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
 }
 async function handleTrack(mode, input, deps) {
   const session = typeof input.session_id === "string" && SESSION_ID2.test(input.session_id) ? input.session_id : null;
@@ -2746,7 +2788,7 @@ var RELEASE_KEYS = ["MCowBQYDK2VwAyEAi8y0ShXULz6qfSv9l7mpyj8fZqgZO1b00YJwYg6Yozc
 
 // src/where.ts
 import { mkdir as mkdir6, readFile as readFile16, realpath, rm as rm9, writeFile as writeFile5 } from "node:fs/promises";
-import { basename, dirname as dirname2, join as join15, resolve as resolve2 } from "node:path";
+import { basename, dirname as dirname2, join as join16, resolve as resolve2 } from "node:path";
 
 // src/release.ts
 import { createHash as createHash4, createPublicKey, verify } from "node:crypto";
@@ -2791,7 +2833,7 @@ async function launcherProblem(launcher, keys) {
   if (!launcher) return "no launcher path";
   if (keys.length === 0) return "not a signed release: no release key pinned";
   const here = dirname2(launcher);
-  const manifestText = (await read3(join15(here, "release.json")))?.toString("utf8") ?? null;
+  const manifestText = (await read3(join16(here, "release.json")))?.toString("utf8") ?? null;
   let bundle = null;
   let files = {};
   try {
@@ -2800,7 +2842,7 @@ async function launcherProblem(launcher, keys) {
     if (parsed?.files && typeof parsed.files === "object") files = parsed.files;
   } catch {
   }
-  const check = checkRelease(keys, manifestText, bundle ? await read3(join15(here, bundle)) : null, (await read3(join15(here, "release.sig")))?.toString("utf8") ?? null);
+  const check = checkRelease(keys, manifestText, bundle ? await read3(join16(here, bundle)) : null, (await read3(join16(here, "release.sig")))?.toString("utf8") ?? null);
   if (!check.ok) return `not a signed release: ${check.reason}`;
   const name = basename(launcher);
   if (name === check.manifest.bundle || typeof files[name] !== "string") return "not run through a release launcher";
@@ -2818,22 +2860,22 @@ async function noteWhere(args) {
   const problem = await launcherProblem(launcher, args.keys);
   const why = problem ?? ((await readCredentials(args.data))?.refresh_token ? null : `not signed in here (${args.data})`);
   if (why) {
-    await mkdir6(args.data, { recursive: true }).then(() => writeFile5(join15(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
+    await mkdir6(args.data, { recursive: true }).then(() => writeFile5(join16(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
     return { wrote: false, why };
   }
   const text = JSON.stringify({ path: launcher, data: args.data });
-  const file = join15(args.home, WHERE_FILE);
+  const file = join16(args.home, WHERE_FILE);
   if (await readFile16(file, "utf8").catch(() => null) !== text) {
     await mkdir6(args.home, { recursive: true });
     await writeAtomic(file, text);
   }
-  await rm9(join15(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
+  await rm9(join16(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
   return { wrote: true };
 }
 async function whereStatus(home, data) {
   let named;
   try {
-    named = JSON.parse(await readFile16(join15(home, WHERE_FILE), "utf8")).data;
+    named = JSON.parse(await readFile16(join16(home, WHERE_FILE), "utf8")).data;
   } catch {
     return { helper_json: "missing", kept_why: await keptWhy(data) };
   }
@@ -2843,7 +2885,7 @@ async function whereStatus(home, data) {
 }
 async function keptWhy(data) {
   try {
-    const value = JSON.parse(await readFile16(join15(data, WHERE_KEPT_FILE), "utf8")).why;
+    const value = JSON.parse(await readFile16(join16(data, WHERE_KEPT_FILE), "utf8")).why;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
@@ -2854,7 +2896,7 @@ async function keptWhy(data) {
 var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
-var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join16(homedir3(), ".commonrig");
+var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join17(homedir3(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
   if (!held?.refresh_token) return null;
@@ -2875,7 +2917,7 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
-var laneDir = () => process.env.COMMONRIG_LANE_DIR || join16(homedir3(), ".commonrig-lane");
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join17(homedir3(), ".commonrig-lane");
 function machineAsks(primary, args, runnerExtra = {}) {
   const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
   const asks = [];
@@ -3072,7 +3114,7 @@ async function readStdin() {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-var noteWhere2 = () => noteWhere({ home: join16(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
+var noteWhere2 = () => noteWhere({ home: join17(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
 async function runTrack(mode) {
   try {
     const input = JSON.parse(await readStdin());
@@ -3191,7 +3233,7 @@ async function runNeverSend(dir, args) {
     await writeNeverSend(dir, { ...read4, mode: rest[0] });
     console.log(rest[0] === "drop" ? "never-send: a prompt or reply with a listed word stays on this machine" : "never-send: listed words are swapped for [withheld] before anything is sent");
   } else if (action === "list") {
-    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join16(dir, "never-send.json") }));
+    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join17(dir, "never-send.json") }));
   } else {
     console.log('usage: helper never-send add <word or "a phrase"...> | remove <word...> | mode drop|mask | list');
     process.exitCode = 2;
@@ -3209,7 +3251,7 @@ async function runNames(dir, flags2) {
     if (!kept) return;
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
-    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join16(dir, NAMES_FILE)}`);
+    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join17(dir, NAMES_FILE)}`);
   } else if (!action || action === "list") {
     const names = await readNames(dir);
     console.log(names === null ? `${NAMES_FILE} could not be read, so every prompt counts as naming one` : names.length ? names.join("\n") : "no private names on this machine");
@@ -3255,7 +3297,7 @@ async function runCommand2(command2, flags2) {
   } else if (command2 === "status") {
     const list = await readNeverSend(dir);
     const neverSend = list === "unreadable" ? "unreadable: holding everything back" : { mode: list.mode, words: list.words.length };
-    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join16(homedir3(), ".commonrig"), dir) }));
+    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join17(homedir3(), ".commonrig"), dir) }));
   } else if (command2 === "names") {
     await runNames(dir, flags2);
   } else if (command2 === "quota") {
