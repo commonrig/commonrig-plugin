@@ -1,6 +1,6 @@
 ---
 description: Run this machine as your CommonRig runner, for items and schedules delegated to it, or sign it in
-argument-hint: "connect [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] | --once [--execute claude|codex] | --loop [--execute claude|codex]"
+argument-hint: "connect [workspace mcp url] [--project <p>] [--flagged] [--harness claude|codex] [--no-browser] | --once [--execute claude|codex] | --loop [--execute claude|codex]"
 allowed-tools: Bash
 ---
 Run one of these and report its output. A non-zero exit is a refusal, and its last line says why.

@@ -1,15 +1,15 @@
 {
   "name": "commonrig",
   "displayName": "CommonRig",
-  "version": "0.20.1",
-  "description": "Connects Claude Code to a CommonRig workspace and captures typed prompts and final replies, masked on your machine first.",
+  "version": "0.22.0",
+  "description": "Connects Claude Code to CommonRig and captures typed prompts and final replies, masked on your machine first.",
   "author": { "name": "CommonRig" },
   "userConfig": {
     "workspace_url": {
       "type": "string",
-      "title": "Workspace MCP URL",
-      "description": "Your workspace's address, ending in /mcp. It is on the connect page.",
-      "required": true
+      "title": "CommonRig MCP address",
+      "description": "Where the tools connect. Leave it as it is: one sign-in reaches every workspace you tick. A workspace's own address, ending in /w/<workspace>/mcp, still works.",
+      "default": "https://dev.commonrig.com/mcp"
     }
   }
 }

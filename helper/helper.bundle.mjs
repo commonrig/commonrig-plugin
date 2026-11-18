@@ -105,6 +105,14 @@ function assertSafeUrl(url) {
   const { protocol, hostname: hostname3 } = new URL(url);
   if (protocol !== "https:" && hostname3 !== "localhost" && hostname3 !== "127.0.0.1") throw new Error("capture needs an https url");
 }
+var isPersonDoor = (url) => URL.canParse(url) && new URL(url).pathname.replace(/\/+$/, "") === "/mcp";
+function workspaceAddress(given, held, command2) {
+  const named = given.filter((one2) => Boolean(one2));
+  const url = named.find((one2) => !isPersonDoor(one2)) ?? held;
+  if (url) return { url };
+  if (!named.length) return null;
+  return { refused: `this signs in to one workspace, and ${named[0]} is your own address for agents. Give the workspace's: ${command2} https://<host>/w/<workspace>/mcp, shown on the Claude Code plugin tab of Connect an agent` };
+}
 function parseBody(contentType, body) {
   if (!contentType.includes("text/event-stream")) return JSON.parse(body);
   const data = body.split("\n").filter((line) => line.startsWith("data:")).at(-1);
@@ -1674,16 +1682,37 @@ async function readCodexUsage(path, session, hookModel = null) {
 import { createHash as createHash2 } from "node:crypto";
 import { mkdir as mkdir2, readFile as readFile7, rm as rm5 } from "node:fs/promises";
 import { join as join7 } from "node:path";
-var CONTEXT_ROOM = 9e3;
+var HOOK_ROOM = 9900;
+var SESSION_ROOM = 500;
+var PATH_ROOM = 260;
+var PARTS = 6;
+function leadText(day, cutPath) {
+  const cut = cutPath === null ? "" : ` Cut here for room: the whole copy is in ${cutPath.length > PATH_ROOM ? "the helper's instructions folder" : cutPath}, and start sends it whole.`;
+  return `CommonRig's instructions for this folder, as start last sent them (${day}), from the helper's own copy. start says if they changed.${cut}`;
+}
+var labelText = (part, parts) => `Part ${part} of ${parts} of CommonRig's instructions: one block split at line ends, and the parts may arrive in any order, so read them in part order.`;
+var fenced = (text) => `[instructions]
+${text}
+[/instructions]`;
+var PART_ROOM = HOOK_ROOM - SESSION_ROOM - (leadText("2026-01-01", "x".repeat(PATH_ROOM)).length + 1) - (labelText(PARTS, PARTS).length + 1) - fenced("").length;
+var CONTEXT_ROOM = PARTS * PART_ROOM;
 var BLOCK = /\n\[instructions\]\n([\s\S]*?)\n\[\/instructions\]/;
-var KEY2 = /^\d{1,15}:\d{1,9}(?:,\d{1,15}:\d{1,9}){0,20}$/;
+var KEY2 = /^p?\d{1,15}:\d{1,9}(?:,\d{1,15}:\d{1,9}){0,20}$/;
 var POINTER = /^(?:Unchanged since|Not yet given|The same as the copy)/;
-var folderKey2 = (cwd) => {
+var MARK_WAIT_MS = 3e3;
+async function signedInAs(dataDir2) {
+  const held = await readCredentials(dataDir2).catch(() => null);
+  if (!held?.refresh_token || typeof held.client_id !== "string" || !held.client_id) return null;
+  return createHash2("sha256").update(`${held.url}
+${held.client_id}`).digest("hex").slice(0, 32);
+}
+var folderKey2 = (cwd, owner) => {
   let path = cwd.trim().replace(/\\/g, "/").replace(/\/+$/, "");
   if (/^[a-z]:\//i.test(path)) path = path.toLowerCase();
-  return createHash2("sha256").update(path).digest("hex");
+  return createHash2("sha256").update(`${owner}
+${path}`).digest("hex");
 };
-var fileFor = (dataDir2, cwd) => join7(dataDir2, "instructions", `${folderKey2(cwd)}.json`);
+var fileFor = (dataDir2, cwd, owner) => join7(dataDir2, "instructions", `${folderKey2(cwd, owner)}.json`);
 function replyText(response) {
   if (typeof response === "string") return response;
   const list = Array.isArray(response) ? response : typeof response === "object" && response !== null && Array.isArray(response.content) ? response.content : null;
@@ -1707,38 +1736,67 @@ async function noteServed(dataDir2, cwd, response, now) {
   const text = replyText(response);
   const served = text ? readServed(text) : null;
   if (!served) return;
-  const file = fileFor(dataDir2, cwd);
+  const owner = await signedInAs(dataDir2);
+  if (!owner) return;
+  const file = fileFor(dataDir2, cwd, owner);
   if (!served.key) {
     if (served.started) await rm5(file, { force: true });
     return;
   }
   if (!served.block) return;
   await mkdir2(join7(dataDir2, "instructions"), { recursive: true, mode: 448 });
-  await writeAtomic(file, JSON.stringify({ key: served.key, block: served.block, at: now }));
+  await writeAtomic(file, JSON.stringify({ key: served.key, block: served.block, at: now, owner }));
 }
 async function cachedFor(dataDir2, cwd) {
   if (!cwd) return null;
+  const owner = await signedInAs(dataDir2);
+  if (!owner) return null;
   try {
-    const raw = JSON.parse(await readFile7(fileFor(dataDir2, cwd), "utf8"));
-    return typeof raw.key === "string" && KEY2.test(raw.key) && typeof raw.block === "string" && typeof raw.at === "number" ? raw : null;
+    const raw = JSON.parse(await readFile7(fileFor(dataDir2, cwd, owner), "utf8"));
+    return raw.owner === owner && typeof raw.key === "string" && KEY2.test(raw.key) && typeof raw.block === "string" && typeof raw.at === "number" ? raw : null;
   } catch {
     return null;
   }
 }
-function cachedContext(cached, dataDir2, cwd) {
-  const day = new Date(cached.at).toISOString().slice(0, 10);
-  const lead = `CommonRig's instructions for this folder, as start last sent them (${day}), from the helper's own copy. start says if they changed.`;
-  if (cached.block.length <= CONTEXT_ROOM) return { text: `${lead}
-[instructions]
-${cached.block}
-[/instructions]`, whole: true };
-  const cut = cached.block.lastIndexOf("\n", CONTEXT_ROOM);
-  return { text: `${lead} Cut here for room: the whole copy is in ${fileFor(dataDir2, cwd)}, and start sends it whole.
-[instructions]
-${cached.block.slice(0, cut > 0 ? cut : CONTEXT_ROOM)}
-[/instructions]`, whole: false };
+function partOf(flags2) {
+  const at = flags2.indexOf("--part");
+  const value = at >= 0 ? Number(flags2[at + 1]) : NaN;
+  return Number.isInteger(value) && value >= 1 && value <= PARTS ? value : void 0;
 }
-var injectedKey = (cached) => cached && cached.block.length <= CONTEXT_ROOM ? cached.key : null;
+function splitParts(block, room = PART_ROOM) {
+  const parts = [];
+  let hard = false;
+  let rest = block;
+  while (rest.length > room) {
+    const cut = rest.lastIndexOf("\n", room);
+    if (cut < 0) hard = true;
+    parts.push(rest.slice(0, cut >= 0 ? cut : room));
+    rest = rest.slice(cut >= 0 ? cut + 1 : room);
+  }
+  parts.push(rest);
+  return { parts, hard };
+}
+var splitBlock = (block, room = PART_ROOM) => splitParts(block, room).parts;
+var fits = (block) => {
+  const { parts, hard } = splitParts(block);
+  return !hard && parts.length <= PARTS;
+};
+function cachedContext(cached, dataDir2, cwd, part) {
+  const whole2 = fits(cached.block);
+  const parts = splitBlock(cached.block).slice(0, PARTS);
+  const day = new Date(cached.at).toISOString().slice(0, 10);
+  const lead = leadText(day, whole2 ? null : fileFor(dataDir2, cwd, cached.owner));
+  if (part === void 0) return { text: `${lead}
+${fenced(parts.join("\n"))}`, whole: whole2, parts: 1 };
+  const share = parts[part - 1];
+  if (share === void 0) return { text: null, whole: whole2, parts: parts.length };
+  if (parts.length === 1) return { text: `${lead}
+${fenced(share)}`, whole: whole2, parts: 1 };
+  return { text: `${part === 1 ? `${lead}
+` : ""}${labelText(part, parts.length)}
+${fenced(share)}`, whole: whole2, parts: parts.length };
+}
+var injectedKey = (cached) => cached && fits(cached.block) ? cached.key : null;
 
 // src/hook.ts
 var realSource = () => sessionSource(process.env, claudeArgs);
@@ -1928,6 +1986,16 @@ var placeInTime = (input, deps) => Promise.race([
   startPlace(input, deps).catch(() => ({})),
   new Promise((resolve3) => setTimeout(() => resolve3({}), PLACE_WAIT_MS).unref())
 ]);
+async function laterPart(dataDir2, session, cwd, part, wait) {
+  const until = Date.now() + wait;
+  for (; ; ) {
+    const mark = (await readSession(dataDir2, session).catch(() => ({}))).copy;
+    const cached = mark ? await cachedFor(dataDir2, cwd).catch(() => null) : null;
+    if (cached && cached.key === mark) return cachedContext(cached, dataDir2, cwd, part).text;
+    if (Date.now() >= until) return null;
+    await new Promise((resolve3) => setTimeout(resolve3, 50));
+  }
+}
 async function handleHook(input, deps) {
   const session = str2(input.session_id);
   const event = str2(input.hook_event_name);
@@ -1941,20 +2009,26 @@ async function handleHook(input, deps) {
     if (cwd && START_TOOL.test(str2(input.tool_name) ?? "")) await noteServed(deps.dataDir, cwd, input.tool_response, deps.now()).catch(() => void 0);
     return null;
   }
+  if (deps.part !== void 0 && deps.part > 1) {
+    const cwd = str2(input.cwd);
+    if (event !== "SessionStart" || !cwd || !session || !SESSION_ID.test(session)) return null;
+    const text = await laterPart(deps.dataDir, session, cwd, deps.part, deps.markWait ?? MARK_WAIT_MS);
+    return text ? JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: text } }) : null;
+  }
   const key = await installKey(deps.dataDir);
   if (!session || !SESSION_ID.test(session)) {
     await recordDrop(deps.dataDir, "no_session");
     return null;
   }
   if (event === "SessionStart") {
-    await pruneSessions(deps.dataDir, deps.now()).catch(() => void 0);
     const model = shaped(input.model, MODEL2);
     const cwd = str2(input.cwd);
     const cached = cwd ? await cachedFor(deps.dataDir, cwd).catch(() => null) : null;
     const held = injectedKey(cached);
     const state = await readSession(deps.dataDir, session).catch(() => ({}));
-    await writeSession(deps.dataDir, session, { ...state, ...model ? { model } : {}, instructions: held ?? void 0 }).catch(() => void 0);
-    return sessionContext(session, str2(input.source), cached && cwd ? cachedContext(cached, deps.dataDir, cwd).text : null);
+    await writeSession(deps.dataDir, session, { ...state, ...model ? { model } : {}, instructions: held ?? void 0, copy: cached?.key }).catch(() => void 0);
+    await pruneSessions(deps.dataDir, deps.now()).catch(() => void 0);
+    return sessionContext(session, str2(input.source), cached && cwd ? cachedContext(cached, deps.dataDir, cwd, deps.part).text : null);
   }
   if (event === "UserPromptSubmit") await onPrompt(input, session, key, deps);
   else if (event === "Stop") await onStop(input, session, key, deps);
@@ -2116,7 +2190,7 @@ async function reportArgs(flags2, read4 = readFile11) {
 async function pushReport(dir, args, fetcher = fetch) {
   const done = await callIntake(dir, "intake_report", args, fetcher);
   if ("line" in done) return done;
-  return { ok: true, line: done.said.again ? `${done.said.id} seen again, ${done.said.count} times` : `${done.said.id} pushed to the Exchange` };
+  return { ok: true, line: done.said.again ? `${done.said.id} seen again, ${done.said.count} times` : `${done.said.id} pushed to the Inbox` };
 }
 async function callIntake(dir, tool, args, fetcher) {
   const held = await readCredentials(dir);
@@ -2829,14 +2903,18 @@ The code works for ${minutes} minutes. Waiting...`);
   console.log(done.length ? `signed in: ${done.join(", ")}. Each is its own connection under Agents, revocable in one click` : "nothing was ticked, so nothing was saved");
   return done;
 }
+function pickAddress(given, held, command2, usage) {
+  const picked = workspaceAddress(given, held, command2);
+  if (picked && "url" in picked) return picked.url;
+  console.log(picked ? picked.refused : usage);
+  process.exitCode = 2;
+  return null;
+}
 async function runConnect(dir, args) {
   const noBrowser = args.includes("--no-browser");
-  const url = args.find((arg) => !arg.startsWith("--")) ?? process.env.CLAUDE_PLUGIN_OPTION_WORKSPACE_URL ?? (await readCredentials(dir))?.url;
-  if (!url) {
-    console.log("usage: helper connect <workspace mcp url> [--lanes] [--intake] [--runner] [--all] [--decisions] [--no-browser] [--loopback]");
-    process.exitCode = 2;
-    return;
-  }
+  const given = [...args.filter((arg) => !arg.startsWith("--")), process.env.CLAUDE_PLUGIN_OPTION_WORKSPACE_URL];
+  const url = pickAddress(given, (await readCredentials(dir))?.url, "/commonrig:connect", "usage: helper connect <workspace mcp url> [--lanes] [--intake] [--runner] [--all] [--decisions] [--no-browser] [--loopback]");
+  if (!url) return;
   if (!args.includes("--loopback")) {
     await runDevice(url, machineAsks("capture", args), args);
     await noteWhere2().catch(() => void 0);
@@ -2864,12 +2942,8 @@ async function runRaise(flags2) {
   const [action, ...rest] = flags2;
   if (action === "connect") {
     const noBrowser = rest.includes("--no-browser");
-    const url = rest.find((arg) => !arg.startsWith("--")) ?? (await readCredentials(dir))?.url;
-    if (!url) {
-      console.log("usage: helper raise connect <workspace mcp url> [--no-browser] [--loopback]");
-      process.exitCode = 2;
-      return;
-    }
+    const url = pickAddress(rest.filter((arg) => !arg.startsWith("--")), (await readCredentials(dir))?.url, "/commonrig:raise connect", "usage: helper raise connect <workspace mcp url> [--no-browser] [--loopback]");
+    if (!url) return;
     if (!rest.includes("--loopback")) {
       await runDevice(url, machineAsks("intake", rest), rest);
       process.exit(0);
@@ -2927,12 +3001,9 @@ async function runRunner(flags2) {
   const value = (list, name) => flagValues(list, name).at(-1);
   if (action === "connect") {
     const noBrowser = rest.includes("--no-browser");
-    const url = rest.find((arg, index) => !arg.startsWith("--") && !["--project", "--harness"].includes(rest[index - 1] ?? "")) ?? (await readCredentials(dir))?.url;
-    if (!url) {
-      console.log(RUNNER_USAGE);
-      process.exitCode = 2;
-      return;
-    }
+    const given = rest.filter((arg, index) => !arg.startsWith("--") && !["--project", "--harness"].includes(rest[index - 1] ?? ""));
+    const url = pickAddress(given, (await readCredentials(dir))?.url, "/commonrig:runner connect", RUNNER_USAGE);
+    if (!url) return;
     const project = value(rest, "--project");
     const harness = value(rest, "--harness");
     const extra = { ...project ? { project } : {}, ...rest.includes("--flagged") ? { flagged: "1" } : {}, ...harness ? { harness } : {} };
@@ -3079,11 +3150,13 @@ async function runCodexHook(flags2) {
     process.exitCode = 0;
   }
 }
-async function runHook() {
+async function runHook(flags2) {
   try {
     const input = JSON.parse(await readStdin());
-    const out = await handleHook(input, { dataDir: dataDir(), transport: await transport(dataDir()), now: Date.now, source: realSource });
-    if (input.hook_event_name === "SessionStart" || input.hook_event_name === "UserPromptSubmit") await noteWhere2().catch(() => void 0);
+    const part = partOf(flags2);
+    const later = part !== void 0 && part > 1;
+    const out = await handleHook(input, { dataDir: dataDir(), transport: later ? null : await transport(dataDir()), now: Date.now, source: realSource, part });
+    if (!later && (input.hook_event_name === "SessionStart" || input.hook_event_name === "UserPromptSubmit")) await noteWhere2().catch(() => void 0);
     if (out) process.stdout.write(out);
   } catch {
     await recordDrop(dataDir(), "hook_error").catch(() => void 0);
@@ -3208,7 +3281,7 @@ async function runCommand2(command2, flags2) {
 var [command, ...flags] = process.argv.slice(2);
 if (command === "statusline") await runStatusline();
 else if (command === "hook" && flags.includes("--codex")) await runCodexHook(flags);
-else if (command === "hook") await runHook();
+else if (command === "hook") await runHook(flags);
 else if (command === "track") await runTrack(flags[0] === "end" ? "end" : "stop");
 else if (command === "runner") {
   await runRunner(flags).catch((error) => {

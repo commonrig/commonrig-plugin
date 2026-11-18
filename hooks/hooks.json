@@ -1,7 +1,12 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "timeout": 15 }] }
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 1", "timeout": 15 }] },
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 2", "timeout": 15 }] },
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 3", "timeout": 15 }] },
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 4", "timeout": 15 }] },
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 5", "timeout": 15 }] },
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook --part 6", "timeout": 15 }] }
     ],
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "async": true }] }
