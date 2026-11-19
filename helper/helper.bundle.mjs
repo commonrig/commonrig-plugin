@@ -1864,7 +1864,13 @@ async function readSession(dir, session) {
   return typeof parsed === "object" && parsed ? parsed : {};
 }
 var writeSession = (dir, session, state) => writeAtomic(sessionFile(dir, session), JSON.stringify(state));
+var PRUNE_EVERY_MS = 24 * 60 * 6e4;
+var PRUNE_MARK = "sessions.pruned";
 async function pruneSessions(dir, now) {
+  const mark = join9(dir, PRUNE_MARK);
+  const last = await readFile8(mark, "utf8").then((text) => Number(text), () => 0);
+  if (Number.isFinite(last) && last <= now && now - last < PRUNE_EVERY_MS) return;
+  await writeAtomic(mark, String(now));
   const folder = join9(dir, "sessions");
   for (const name of await readdir3(folder)) {
     const file = join9(folder, name);
@@ -1973,6 +1979,11 @@ async function onStop(input, session, key, deps) {
   if (await isPaused(dataDir2, pauseKeys, deps.now())) return recordDrop(dataDir2, "paused");
   await spoolRow(dataDir2, replyRow(screened.text, { ...context, client_prompt_id: promptId }, key), pauseKeys);
 }
+function sessionStartFallback(input) {
+  const session = str2(input.session_id);
+  if (input.hook_event_name !== "SessionStart" || !session || !SESSION_ID.test(session)) return null;
+  return sessionContext(session, str2(input.source));
+}
 function sessionContext(session, source, instructions = null) {
   const compacted = source === "compact" ? " Your context was just compacted: call summary with your handle for your claimed item, its request and its criteria. If the handle is gone, call start with that client_session." : "";
   return JSON.stringify({
@@ -1993,6 +2004,7 @@ function startInput(input, session, held = null, place = {}) {
   const updatedInput = { ...tool, ...place, client_session: session, ...agent && AGENT_ID.test(agent) ? { subagent: agent } : {}, ...held && !agent ? { instructions_cached: held } : {} };
   return JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } });
 }
+var ABSOLUTE = /^(?:[a-z]:[\\/]|\/|\\\\)/i;
 async function startPlace(input, deps) {
   const tool = input.tool_input;
   const cwd = str2(input.cwd);
@@ -2002,7 +2014,9 @@ async function startPlace(input, deps) {
   if (!needRepo && !needFolder) return {};
   let url = null;
   const remote = async (dir) => url = await (deps.remote ?? gitRemote)(dir);
-  const { candidates } = await repoKeys(cwd, await installKey(deps.dataDir), remote, deps.root);
+  const named = str2(tool.folder);
+  const where2 = named && named.length <= 512 && ABSOLUTE.test(named) ? named : cwd;
+  const { candidates } = await repoKeys(where2, await installKey(deps.dataDir), remote, deps.root);
   if (await isPaused(deps.dataDir, candidates, deps.now())) return {};
   const list = await readNeverSend(deps.dataDir);
   const clean = (value) => {
@@ -2066,7 +2080,7 @@ async function handleHook(input, deps) {
     return sessionContext(session, str2(input.source), cached && cwd ? cachedContext(cached, deps.dataDir, cwd, deps.part).text : null);
   }
   if (event === "UserPromptSubmit") await onPrompt(input, session, key, deps);
-  else if (event === "Stop") await onStop(input, session, key, deps);
+  else if (event === "Stop" || event === "SubagentStop") await onStop(input, session, key, deps);
   else return null;
   if (deps.transport) await flush(deps.dataDir, deps.transport, deps.now());
   return null;
@@ -2088,7 +2102,7 @@ function linkProblem(link, signedInTo) {
   }
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) return "an upload link is https";
-  if (!LINK.test(url.pathname) || url.search || url.hash) return "that is not an upload link from file_upload_url";
+  if (!LINK.test(url.pathname) || url.search || url.hash) return "that is not an upload link from CommonRig's file tool (action upload)";
   if (!signedInTo) return "this machine is not signed in, so it has no server to send to: run /commonrig:connect first";
   if (new URL(signedInTo).origin !== url.origin) return `this machine is signed in to ${new URL(signedInTo).origin}, and that link is somewhere else`;
   return null;
@@ -2136,7 +2150,7 @@ async function runPut(flags2, signedInTo, send = fetch, run2 = runCommand) {
   const cut = words.lastIndexOf(" ");
   const file = cut > 0 ? words.slice(0, cut).trim().replace(/^"(.*)"$/, "$1") : "";
   const link = cut > 0 ? words.slice(cut + 1) : "";
-  if (!file || !link) return { ok: false, line: "usage: helper put <file> <upload link from file_upload_url>" };
+  if (!file || !link) return { ok: false, line: "usage: helper put <file> <upload link from CommonRig's file tool, action upload>" };
   const problem = linkProblem(link, signedInTo);
   if (problem) return { ok: false, line: `not sent: ${problem}` };
   const original = await readFile9(file).catch(() => null);
@@ -2896,6 +2910,7 @@ async function keptWhy(data) {
 var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
+var START_DEADLINE_MS = 8e3;
 var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join17(homedir3(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
@@ -3197,9 +3212,16 @@ async function runHook(flags2) {
     const input = JSON.parse(await readStdin());
     const part = partOf(flags2);
     const later = part !== void 0 && part > 1;
-    const out = await handleHook(input, { dataDir: dataDir(), transport: later ? null : await transport(dataDir()), now: Date.now, source: realSource, part });
-    if (!later && (input.hook_event_name === "SessionStart" || input.hook_event_name === "UserPromptSubmit")) await noteWhere2().catch(() => void 0);
-    if (out) process.stdout.write(out);
+    const work = (async () => handleHook(input, { dataDir: dataDir(), transport: later ? null : await transport(dataDir()), now: Date.now, source: realSource, part }))();
+    const fallback = later ? null : sessionStartFallback(input);
+    let timer;
+    const out = fallback ? await Promise.race([work, new Promise((done) => {
+      timer = setTimeout(() => done(fallback), Math.max(0, START_DEADLINE_MS - performance.now()));
+    })]) : await work;
+    clearTimeout(timer);
+    if (out) await new Promise((done) => process.stdout.write(out, () => done()));
+    if (fallback && out === fallback) process.exit(0);
+    if (!later && input.hook_event_name === "UserPromptSubmit") await noteWhere2().catch(() => void 0);
   } catch {
     await recordDrop(dataDir(), "hook_error").catch(() => void 0);
     process.exitCode = 0;

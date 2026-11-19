@@ -19,6 +19,9 @@
     ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "async": true }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/helper/helper.mjs\" hook", "async": true }] }
     ]
   }
 }
