@@ -480,11 +480,11 @@ async function linuxArgs(wanted = isClaude) {
   let pid = process.ppid;
   for (let step = 0; step < WALK && pid > 1; step += 1) {
     const cmdline = await readFile3(`/proc/${pid}/cmdline`, "utf8").catch(() => null);
-    const stat5 = await readFile3(`/proc/${pid}/stat`, "utf8").catch(() => null);
-    if (cmdline === null || stat5 === null) return null;
+    const stat6 = await readFile3(`/proc/${pid}/stat`, "utf8").catch(() => null);
+    if (cmdline === null || stat6 === null) return null;
     const args = cmdline.split("\0").filter((arg, index, all) => arg || index < all.length - 1);
     if (wanted(args)) return args;
-    pid = Number(stat5.slice(stat5.lastIndexOf(")") + 2).split(" ")[1]);
+    pid = Number(stat6.slice(stat6.lastIndexOf(")") + 2).split(" ")[1]);
   }
   return null;
 }
@@ -581,7 +581,7 @@ function cleanRemote(raw) {
 }
 
 // src/hook.ts
-import { mkdir as mkdir3, readdir as readdir3, readFile as readFile8, rm as rm6, stat as stat4 } from "node:fs/promises";
+import { mkdir as mkdir3, readdir as readdir3, readFile as readFile8, rm as rm6, stat as stat5 } from "node:fs/promises";
 import { join as join9 } from "node:path";
 
 // src/capture.ts
@@ -1177,6 +1177,9 @@ function agentShaped(text) {
 }
 var SESSION_BRIEF = /^\s*Background \(from the session that started this one\):\r?\n[\s\S]*?\n\s*Task:\s*\r?\n/;
 
+// ../domain/src/auto-settle.ts
+var CLAIMS_RELEASE_MAX_HOURS = 24 * 14;
+
 // ../domain/src/library.ts
 var CATEGORY_WORDS = {
   agents: ["agent", "agents", "subagent", "subagents", "claude", "codex", "harness", "prompt", "prompts", "model", "models", "mcp", "hook", "hooks", "skill", "skills", "headless", "llm", "token", "tokens", "context", "orchestrator", "lane", "lanes", "opus", "sonnet", "haiku", "gpt", "gemini", "openrouter", "review", "reviewer"],
@@ -1284,6 +1287,62 @@ function dropReason(prompt, agentId, crons, key) {
   return null;
 }
 
+// src/mid-turn.ts
+import { createReadStream } from "node:fs";
+import { stat as stat2 } from "node:fs/promises";
+var MID_TURN_READ_BYTES = 64 * 1024 * 1024;
+var ID = /^[\w-]{1,128}$/;
+var MARK = Buffer.from('"queued_command"');
+var textOf = (prompt) => {
+  if (typeof prompt === "string") return prompt;
+  if (!Array.isArray(prompt)) return "";
+  return prompt.flatMap((block) => block && typeof block === "object" && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join("\n");
+};
+function midTurnOf(line) {
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!entry || typeof entry !== "object") return null;
+  const { type, attachment, timestamp } = entry;
+  if (type !== "attachment" || !attachment || attachment.type !== "queued_command") return null;
+  const origin = attachment.origin;
+  if (origin?.kind !== "human" || attachment.humanTurn !== true || attachment.commandMode !== "prompt") return null;
+  const id = typeof attachment.source_uuid === "string" && ID.test(attachment.source_uuid) ? attachment.source_uuid : null;
+  const text = textOf(attachment.prompt);
+  if (!id || !text.trim()) return null;
+  const stamp = typeof attachment.timestamp === "string" ? attachment.timestamp : typeof timestamp === "string" ? timestamp : "";
+  const at = Date.parse(stamp);
+  return { id, text, at: Number.isFinite(at) ? at : null };
+}
+async function readMidTurn(path, from, limit = MID_TURN_READ_BYTES) {
+  const size = await stat2(path).then((info) => info.isFile() ? info.size : -1, () => -1);
+  if (size < 0) return { messages: [], next: from };
+  const start = Number.isInteger(from) && from >= 0 && from <= size ? from : 0;
+  if (start === size) return { messages: [], next: start };
+  const end = Math.min(size, start + limit);
+  const messages = [];
+  let next = start;
+  let carry = Buffer.alloc(0);
+  for await (const chunk of createReadStream(path, { start, end: end - 1 })) {
+    let buffer = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+    for (let newline = buffer.indexOf(10); newline !== -1; newline = buffer.indexOf(10)) {
+      const line = buffer.subarray(0, newline);
+      next += newline + 1;
+      if (line.includes(MARK)) {
+        const found = midTurnOf(line.toString("utf8"));
+        if (found) messages.push(found);
+      }
+      buffer = buffer.subarray(newline + 1);
+    }
+    carry = Buffer.from(buffer);
+  }
+  if (next === start && end - start >= limit) next = end;
+  return { messages, next };
+}
+
 // src/names.ts
 import { readFile as readFile4 } from "node:fs/promises";
 import { join as join4 } from "node:path";
@@ -1372,7 +1431,7 @@ var neverSendArgs = (line) => [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].m
 
 // src/spool.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { appendFile, readdir, readFile as readFile6, rename as rename2, rm as rm4, stat as stat2, utimes } from "node:fs/promises";
+import { appendFile, readdir, readFile as readFile6, rename as rename2, rm as rm4, stat as stat3, utimes } from "node:fs/promises";
 import { join as join6 } from "node:path";
 var SPOOL_MAX_BYTES = 5 * 1024 * 1024;
 var BATCH_ROWS = 50;
@@ -1390,17 +1449,17 @@ async function append(dir, entries) {
 }
 var DROP_MAX_BYTES = SPOOL_MAX_BYTES + 256 * 1024;
 async function recordDrop(dir, reason, count = 1) {
-  const size = await stat2(join6(dir, SPOOL)).then((info) => info.size, () => 0);
+  const size = await stat3(join6(dir, SPOOL)).then((info) => info.size, () => 0);
   if (size >= DROP_MAX_BYTES) return;
   await append(dir, [{ drop: reason, count }]);
 }
 async function spoolRow(dir, row, pauseKeys) {
-  const size = await stat2(join6(dir, SPOOL)).then((info) => info.size, () => 0);
+  const size = await stat3(join6(dir, SPOOL)).then((info) => info.size, () => 0);
   if (size >= SPOOL_MAX_BYTES) return recordDrop(dir, "spool_full");
   await append(dir, [{ row, pauseKeys }]);
 }
 async function spoolUsage(dir, usage, pauseKeys) {
-  const size = await stat2(join6(dir, SPOOL)).then((info) => info.size, () => 0);
+  const size = await stat3(join6(dir, SPOOL)).then((info) => info.size, () => 0);
   if (size >= SPOOL_MAX_BYTES) return recordDrop(dir, "spool_full");
   await append(dir, [{ usage, pauseKeys }]);
 }
@@ -1460,7 +1519,7 @@ async function claim(dir, now) {
   await withLock(join6(dir, LOCK3), now, () => take(SPOOL), LOCK_WAIT_MS);
   for (const name of await readdir(dir)) {
     if (!name.startsWith(CLAIM) || claimed.includes(join6(dir, name))) continue;
-    const modified = await stat2(join6(dir, name)).then((info) => info.mtimeMs, () => now);
+    const modified = await stat3(join6(dir, name)).then((info) => info.mtimeMs, () => now);
     if (now - modified > STALE_CLAIM_MS) await take(name);
   }
   return claimed;
@@ -1528,8 +1587,8 @@ async function spoolStatus(dir) {
 }
 
 // src/usage.ts
-import { createReadStream } from "node:fs";
-import { readdir as readdir2, stat as stat3 } from "node:fs/promises";
+import { createReadStream as createReadStream2 } from "node:fs";
+import { readdir as readdir2, stat as stat4 } from "node:fs/promises";
 import { join as join7 } from "node:path";
 import { createInterface } from "node:readline";
 var IDLE_GAP_MS = 5 * 6e4;
@@ -1541,11 +1600,11 @@ var MODEL = /^[\w.:[\]-]{1,64}$/;
 var STAMP = /"timestamp":"([^"]{10,40})"/;
 var num = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
 var sizeOk = async (path) => {
-  const size = await stat3(path).then((info) => info.isFile() ? info.size : -1, () => -1);
+  const size = await stat4(path).then((info) => info.isFile() ? info.size : -1, () => -1);
   return size >= 0 && size <= MAX_LOG_BYTES;
 };
 async function readClaudeLog(path, messages, minutes) {
-  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
+  const lines = createInterface({ input: createReadStream2(path, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const line of lines) {
     if (minutes) {
       const stamp = STAMP.exec(line)?.[1];
@@ -1578,7 +1637,7 @@ async function subagentLogs(path, cap = MAX_SUBAGENT_LOGS, budget = MAX_SUBAGENT
   const names = (await readdir2(dir).catch(() => [])).filter((name) => name.endsWith(".jsonl"));
   const files = [];
   for (const name of names) {
-    const info = await stat3(join7(dir, name)).catch(() => null);
+    const info = await stat4(join7(dir, name)).catch(() => null);
     if (info?.isFile() && info.size <= MAX_LOG_BYTES) files.push({ path: join7(dir, name), at: info.birthtimeMs || info.mtimeMs, size: info.size });
   }
   files.sort((a, b) => a.at - b.at || a.path.localeCompare(b.path));
@@ -1651,7 +1710,7 @@ async function readCodexUsage(path, session, hookModel = null) {
   let first = null;
   let last = null;
   let active = 0;
-  const lines = createInterface({ input: createReadStream(path, { encoding: "utf8" }), crlfDelay: Infinity });
+  const lines = createInterface({ input: createReadStream2(path, { encoding: "utf8" }), crlfDelay: Infinity });
   try {
     for await (const line of lines) {
       const stamp = STAMP.exec(line)?.[1];
@@ -1874,7 +1933,7 @@ async function pruneSessions(dir, now) {
   const folder = join9(dir, "sessions");
   for (const name of await readdir3(folder)) {
     const file = join9(folder, name);
-    const modified = await stat4(file).then((info) => info.mtimeMs, () => now);
+    const modified = await stat5(file).then((info) => info.mtimeMs, () => now);
     if (now - modified > SESSION_MAX_AGE_MS) await rm6(file, { force: true }).catch(() => void 0);
   }
 }
@@ -1942,9 +2001,35 @@ ${prompt}`).digest("hex").slice(0, 32);
   const source = state.source ?? looked?.source ?? "person";
   const now = looked ? await readSession(dataDir2, session) : state;
   await writeSession(dataDir2, session, { ...now, promptId, skipped: void 0, source: looked && !looked.read ? void 0 : source });
-  const said2 = promptRow(screened.text, { ...context, client_prompt_id: promptId }, key);
+  await spoolPrompt(dataDir2, prompt, screened.text, { ...context, client_prompt_id: promptId }, source, key, pauseKeys);
+}
+async function spoolPrompt(dataDir2, raw, screenedText, context, source, key, pauseKeys) {
+  const said2 = promptRow(screenedText, context, key);
   const row = source === "person" ? said2 : { ...said2, said_by: source };
-  await spoolRow(dataDir2, await namesPrivate(dataDir2, prompt) ? { ...row, private_name: true } : row, pauseKeys);
+  await spoolRow(dataDir2, await namesPrivate(dataDir2, raw) ? { ...row, private_name: true } : row, pauseKeys);
+}
+async function keepMidTurn(message, input, session, state, key, deps) {
+  const { dataDir: dataDir2 } = deps;
+  const reason = dropReason(message.text, void 0, state.crons ?? [], key) ?? (PAUSE_COMMAND.test(message.text) ? "harness" : null);
+  if (reason) return recordDrop(dataDir2, reason);
+  const list = await readNeverSend(dataDir2);
+  const screened = screen(message.text, list);
+  if (!screened.keep || NEVER_SEND_COMMAND.test(message.text)) return recordDrop(dataDir2, "never_send");
+  const { context, pauseKeys } = await where(input, session, state, key, deps, list);
+  if (await isPaused(dataDir2, pauseKeys, deps.now())) return recordDrop(dataDir2, "paused");
+  const source = state.source ?? "person";
+  await spoolPrompt(dataDir2, message.text, screened.text, { ...context, client_prompt_id: message.id, at: message.at ?? context.at }, source, key, pauseKeys);
+}
+async function keepMidTurns(input, session, key, deps) {
+  const path = str2(input.transcript_path);
+  if (!path) return;
+  const state = await readSession(deps.dataDir, session);
+  const from = state.midTurn ?? 0;
+  const { messages, next } = await readMidTurn(path, from);
+  for (const message of messages) await keepMidTurn(message, input, session, state, key, deps);
+  if (next === from) return;
+  const now = await readSession(deps.dataDir, session);
+  await writeSession(deps.dataDir, session, { ...now, midTurn: next });
 }
 async function spoolTotals(input, session, state, key, deps) {
   const totals = await (deps.usage ? deps.usage(input, session) : readUsage(input.transcript_path, session));
@@ -1966,6 +2051,7 @@ async function onStop(input, session, key, deps) {
     return recordDrop(dataDir2, "subagent");
   }
   await spoolTotals(input, session, state, key, deps).catch(() => recordDrop(dataDir2, "usage_error"));
+  await keepMidTurns(input, session, key, deps).catch(() => recordDrop(dataDir2, "mid_turn_error"));
   const reply = str2(input.last_assistant_message);
   if (!reply) return;
   const inputId = shaped(input.prompt_id, SESSION_ID);
