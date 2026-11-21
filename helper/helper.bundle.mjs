@@ -1344,14 +1344,61 @@ async function readMidTurn(path, from, limit = MID_TURN_READ_BYTES) {
 }
 
 // src/names.ts
+import { readFile as readFile5 } from "node:fs/promises";
+import { join as join5 } from "node:path";
+
+// src/never-send.ts
 import { readFile as readFile4 } from "node:fs/promises";
 import { join as join4 } from "node:path";
+var NEVER_SEND_FILE = "never-send.json";
+var MAX_WORDS = 500;
+var MAX_WORD = 200;
+var WITHHELD = "[withheld]";
+var empty2 = () => ({ mode: "drop", words: [] });
+var cleanWord = (word) => {
+  const trimmed = word.trim().replace(/\s+/g, " ");
+  return trimmed && trimmed.length <= MAX_WORD && /[\p{L}\p{N}]/u.test(trimmed) ? trimmed : null;
+};
+async function readNeverSend(dir) {
+  let raw;
+  try {
+    raw = await readFile4(join4(dir, NEVER_SEND_FILE), "utf8");
+  } catch (error) {
+    return error.code === "ENOENT" ? empty2() : "unreadable";
+  }
+  try {
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+    if (typeof parsed !== "object" || !parsed || !Array.isArray(parsed.words)) return "unreadable";
+    const words = parsed.words.flatMap((word) => typeof word === "string" ? [cleanWord(word)].filter((clean) => clean !== null) : []);
+    return { mode: parsed.mode === "mask" ? "mask" : "drop", words: [...new Set(words)].slice(0, MAX_WORDS) };
+  } catch {
+    return "unreadable";
+  }
+}
+var writeNeverSend = (dir, list) => writeAtomic(join4(dir, NEVER_SEND_FILE), `${JSON.stringify(list, null, 2)}
+`);
+var escape = (word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+function wordPattern(words) {
+  if (!words.length) return null;
+  const alternatives = [...words].sort((a, b) => b.length - a.length).map(escape).join("|");
+  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${alternatives})(?![\\p{L}\\p{N}])`, "giu");
+}
+function screen(text, list) {
+  if (list === "unreadable") return text.trim() ? { keep: false } : { keep: true, text };
+  const pattern = wordPattern(list.words);
+  if (!pattern || !text) return { keep: true, text };
+  if (!new RegExp(pattern.source, "iu").test(text)) return { keep: true, text };
+  return list.mode === "mask" ? { keep: true, text: text.replace(pattern, WITHHELD) } : { keep: false };
+}
+var neverSendArgs = (line) => [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3] ?? "");
+
+// src/names.ts
 var NAMES_FILE = "private-names.txt";
 var MAX_NAME = 200;
 var parse = (text) => [...new Set(text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#")))];
 async function readNames(dir) {
   try {
-    return parse(await readFile4(join4(dir, NAMES_FILE), "utf8"));
+    return parse(await readFile5(join5(dir, NAMES_FILE), "utf8"));
   } catch (error) {
     return error.code === "ENOENT" ? [] : null;
   }
@@ -1378,56 +1425,19 @@ async function setName(dir, name, on) {
   const names = await readNames(dir);
   if (names === null) throw new Error(`${NAMES_FILE} could not be read. Fix or remove it by hand`);
   const kept = on ? [.../* @__PURE__ */ new Set([...names, clean])] : names.filter((held) => held.toLowerCase() !== clean.toLowerCase());
-  await writeAtomic(join4(dir, NAMES_FILE), `# Private names: a prompt that names one is never filed as a shared request. This list stays on this machine
+  await writeAtomic(join5(dir, NAMES_FILE), `# Private names: a prompt that names one is never filed as a shared request. This list stays on this machine
 ${kept.join("\n")}
 `);
   return kept;
 }
-
-// src/never-send.ts
-import { readFile as readFile5 } from "node:fs/promises";
-import { join as join5 } from "node:path";
-var NEVER_SEND_FILE = "never-send.json";
-var MAX_WORDS = 500;
-var MAX_WORD = 200;
-var WITHHELD = "[withheld]";
-var empty2 = () => ({ mode: "drop", words: [] });
-var cleanWord = (word) => {
-  const trimmed = word.trim().replace(/\s+/g, " ");
-  return trimmed && trimmed.length <= MAX_WORD && /[\p{L}\p{N}]/u.test(trimmed) ? trimmed : null;
-};
-async function readNeverSend(dir) {
-  let raw;
-  try {
-    raw = await readFile5(join5(dir, NEVER_SEND_FILE), "utf8");
-  } catch (error) {
-    return error.code === "ENOENT" ? empty2() : "unreadable";
-  }
-  try {
-    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
-    if (typeof parsed !== "object" || !parsed || !Array.isArray(parsed.words)) return "unreadable";
-    const words = parsed.words.flatMap((word) => typeof word === "string" ? [cleanWord(word)].filter((clean) => clean !== null) : []);
-    return { mode: parsed.mode === "mask" ? "mask" : "drop", words: [...new Set(words)].slice(0, MAX_WORDS) };
-  } catch {
-    return "unreadable";
-  }
-}
-var writeNeverSend = (dir, list) => writeAtomic(join5(dir, NEVER_SEND_FILE), `${JSON.stringify(list, null, 2)}
-`);
-var escape = (word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
-function wordPattern(words) {
-  if (!words.length) return null;
-  const alternatives = [...words].sort((a, b) => b.length - a.length).map(escape).join("|");
-  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${alternatives})(?![\\p{L}\\p{N}])`, "giu");
-}
-function screen(text, list) {
-  if (list === "unreadable") return text.trim() ? { keep: false } : { keep: true, text };
+async function heldLocally(dir, texts) {
+  const names = await readNames(dir);
+  const list = await readNeverSend(dir);
+  if (names === null || list === "unreadable") return texts.map((_, at) => at);
   const pattern = wordPattern(list.words);
-  if (!pattern || !text) return { keep: true, text };
-  if (!new RegExp(pattern.source, "iu").test(text)) return { keep: true, text };
-  return list.mode === "mask" ? { keep: true, text: text.replace(pattern, WITHHELD) } : { keep: false };
+  const said2 = pattern ? new RegExp(pattern.source, "iu") : null;
+  return texts.flatMap((text, at) => namesIn(text, names).length || said2?.test(text) ? [at] : []);
 }
-var neverSendArgs = (line) => [...line.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((match) => match[1] ?? match[2] ?? match[3] ?? "");
 
 // src/spool.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
@@ -2400,6 +2410,9 @@ var TITLES = {
   tools: "Tool use",
   audit: "Rights trail"
 };
+var EXPORT_FORMAT = "commonrig-export";
+var EXPORT_VERSION = 3;
+var EXPORT_SPEC_URL = "https://commonrig.com/docs/data/export-format/";
 var MINE_NOTE = "Your own prompts with their replies, and every project, item, request, thread, doc, report, file record, schedule, learning, handover, milestone, checklist, environment record, build, tag, rig page and quota line you can see in this workspace. File bytes download from Files. Report pages are in the JSON.";
 var TEXT_FIELDS = ["description", "verbatim", "body", "plan", "outcome", "summary", "what", "decision", "ask", "text", "reply", "locator", "detail", "changes", "command"];
 var WORKED_OUT = { schedules: ["state"] };
@@ -2422,15 +2435,120 @@ function said(list, label) {
     return [`- ${String(one2.by ?? "someone")}${one2.at ? `, ${when(one2.at)}` : ""}:`, "", quoted(String(one2.body ?? "")), ""];
   })];
 }
+var FOLDER_OF_PREFIX = {
+  ITM: "items",
+  REQ: "requests",
+  RPT: "reports",
+  HND: "handovers",
+  DOC: "docs",
+  FIL: "files",
+  SCH: "schedules",
+  THR: "threads",
+  CRD: "learnings",
+  RUL: "learnings",
+  PKG: "learnings",
+  MIL: "milestones",
+  CHK: "checklists",
+  TST: "checklists",
+  HST: "environment",
+  SVC: "environment",
+  JOB: "environment",
+  RBK: "environment",
+  PLC: "environment",
+  ACC: "environment",
+  BLD: "builds",
+  TAG: "tags",
+  PAG: "pages"
+};
+var TYPE_OF_PART = {
+  projects: "project",
+  items: "item",
+  requests: "request",
+  threads: "thread",
+  docs: "doc",
+  doc_versions: "doc_version",
+  reports: "report",
+  report_versions: "report_page",
+  files: "file",
+  schedules: "schedule",
+  cards: "learning",
+  handovers: "handover",
+  milestones: "milestone",
+  checklists: "checklist",
+  environment: "environment",
+  builds: "build",
+  tags: "tag",
+  pages: "page",
+  directions: "context",
+  prompts: "prompt"
+};
+var isNum = (value) => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+var TYPED_WORD = /(?<![\w/#&|[-])(?:ITM|REQ|RPT|HND|DOC|FIL|SCH|THR|CRD|RUL|PKG|MIL|CHK|TST|HST|SVC|JOB|RBK|PLC|ACC|BLD|TAG|PAG)-[1-9]\d{0,14}(?![\w-])/g;
+function refsOf(row) {
+  const raw = row.refs;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  return Object.entries(raw).map(([key, ref]) => [Number(key), ref]).filter((pair) => isNum(pair[0]) && typeof pair[1] === "string" && FOLDER_OF_PREFIX[pair[1].split("-")[0] ?? ""] !== void 0).sort((a, b) => a[0] - b[0]);
+}
+var wikilink = (num2, ref) => `[[${FOLDER_OF_PREFIX[ref.split("-")[0] ?? ""]}/${num2}|${ref}]]`;
+var projectLink = (id) => `[[projects/${safeName(id)}|${id.replace(/[[\]|]/g, "")}]]`;
+var yaml = (value) => typeof value === "string" ? JSON.stringify(value) : String(value);
+var yamlList = (values) => `[${values.map((value) => yaml(value)).join(", ")}]`;
+var isoOf = (value) => typeof value === "number" && value > 0 ? new Date(value).toISOString() : null;
+function obsidianTag(raw) {
+  const tag = raw.trim().replace(/^#/, "").replace(/[^\p{L}\p{N}_/-]+/gu, "-").replace(/^-+|-+$/g, "");
+  return tag && !/^\d+$/.test(tag) ? tag : null;
+}
+function idOf(part, row) {
+  if (part === "doc_versions") return `${typeof row.doc_ref === "string" ? row.doc_ref : `#${String(row.doc_num)}`}.v${String(row.version)}`;
+  if (typeof row.ref === "string") return row.ref;
+  if (isNum(row.num)) return `#${row.num}`;
+  return String(row.id ?? row.scope ?? "");
+}
+function frontMatter(part, row) {
+  const lines = ["---", `id: ${yaml(idOf(part, row))}`];
+  if (isNum(row.num)) lines.push(`num: ${row.num}`);
+  lines.push(`type: ${TYPE_OF_PART[part] ?? part}`);
+  const title = [row.title, row.name].find((value) => typeof value === "string" && value);
+  if (title) lines.push(`title: ${yaml(title.replace(/\s+/g, " "))}`);
+  for (const key of ["kind", "status", "priority"]) if (typeof row[key] === "string" && row[key]) lines.push(`${key}: ${yaml(row[key])}`);
+  const project = part === "projects" ? null : typeof row.project_id === "string" && row.project_id ? row.project_id : null;
+  if (project) lines.push(`project: ${yaml(project)}`);
+  const tags = (Array.isArray(row.tags) ? row.tags : []).filter((tag) => typeof tag === "string").map(obsidianTag).filter((tag) => tag !== null);
+  if (tags.length) lines.push(`tags: ${yamlList([...new Set(tags)])}`);
+  for (const [key, field] of [["created", "created"], ["updated", "updated"], ["at", "at"]]) {
+    const at = isoOf(row[field]);
+    if (at) lines.push(`${key}: ${at}`);
+  }
+  const own = typeof row.ref === "string" ? [row.ref] : [];
+  if (own.length) lines.push(`aliases: ${yamlList(own)}`);
+  const links = [...project ? [projectLink(project)] : [], ...refsOf(row).map(([num2, ref]) => wikilink(num2, ref))];
+  if (links.length) lines.push(`links: ${yamlList(links)}`);
+  lines.push(`commonrig_export: ${EXPORT_VERSION}`, "---");
+  return lines.join("\n");
+}
+function linkedText(text, byRef) {
+  if (!byRef.size) return text;
+  let fenced2 = false;
+  return text.split("\n").map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) fenced2 = !fenced2;
+    if (fenced2 || line.includes("`")) return line;
+    return line.replace(TYPED_WORD, (ref) => byRef.has(ref) ? wikilink(byRef.get(ref), ref) : ref);
+  }).join("\n");
+}
 function recordMarkdown(part, row) {
-  const out = [`# ${heading(part, row).replace(/\s+/g, " ")}`, ""];
+  const refs = refsOf(row);
+  const byRef = new Map(refs.map(([num2, ref]) => [ref, num2]));
+  const out = [frontMatter(part, row), "", `# ${heading(part, row).replace(/\s+/g, " ")}`, ""];
   const line = facts(row);
   if (line) out.push(line, "");
   for (const field of TEXT_FIELDS) {
     const value = row[field];
-    if (typeof value === "string" && value.trim()) out.push(`${field}:`, "", quoted(value), "");
+    if (typeof value === "string" && value.trim()) out.push(`${field}:`, "", quoted(linkedText(value, byRef)), "");
   }
-  out.push(...said(row.notes, "notes"), ...said(row.messages, "messages"));
+  const relinked = (list) => Array.isArray(list) ? list.map((one2) => one2 && typeof one2 === "object" && typeof one2.body === "string" ? { ...one2, body: linkedText(one2.body, byRef) } : one2) : list;
+  out.push(...said(relinked(row.notes), "notes"), ...said(relinked(row.messages), "messages"));
+  const project = part !== "projects" && typeof row.project_id === "string" && row.project_id ? row.project_id : null;
+  if (project || refs.length) out.push("links:", "", ...project ? [`- project ${projectLink(project)}`] : [], ...refs.map(([num2, ref]) => `- ${wikilink(num2, ref)}`), "");
   return `${out.join("\n").trimEnd()}
 `;
 }
@@ -2469,7 +2587,7 @@ var asJson = (value) => `${JSON.stringify(value, null, 2)}
 var whole = (file) => ({ ...file, text: file.text.replace(new RegExp("\\p{Cs}", "gu"), "\uFFFD") });
 function headFiles(head, counts) {
   const lines = Object.entries(counts).filter(([part]) => part !== "doc_versions" && part !== "report_versions").map(([part, count]) => `- ${TITLES[part] ?? part}: ${count}`);
-  const readme = [`# CommonRig export: ${head.workspace.replace(/\s+/g, " ")}`, "", head.note, "", ...lines, "", "Each record is a `.md` to read and a `.json` beside it with every field. Paths use record numbers (`#n`) and stay put. A record's typed id, like ITM-12, is its heading and its `ref`.", ""].join("\n");
+  const readme = [`# CommonRig export: ${head.workspace.replace(/\s+/g, " ")}`, "", head.note, "", ...lines, "", "Each record is a `.md` to read and a `.json` beside it with every field. Paths use record numbers (`#n`) and stay put. A record's typed id, like ITM-12, is its heading and its `ref`.", "", `Open this folder as an Obsidian vault: each \`.md\` starts with front matter (id, type, status, project, tags, dates, links) and links to the records it names. The format is ${head.format} version ${head.version}, described at ${EXPORT_SPEC_URL}.`, ""].join("\n");
   return [
     { path: "README.md", text: readme },
     { path: "commonrig.json", text: asJson({ format: head.format, version: head.version, workspace: head.workspace, scope: head.scope, ...head.workData ? { work_data: true } : {}, counts }) }
@@ -2697,7 +2815,7 @@ async function pullExport(dir, parts, io) {
       before = String(got.next);
     }
   }
-  for (const file of headFiles({ format: "commonrig-export", version: 2, workspace: "this workspace", scope: "mine", note: MINE_NOTE }, counts)) await put(file.path, file.text);
+  for (const file of headFiles({ format: EXPORT_FORMAT, version: EXPORT_VERSION, workspace: "this workspace", scope: "mine", note: MINE_NOTE }, counts)) await put(file.path, file.text);
   await rm8(`${target}.old`, { recursive: true, force: true });
   await rename3(target, `${target}.old`).catch(() => void 0);
   await rename3(fresh, target);
@@ -2840,7 +2958,7 @@ function postBehind(dir) {
 }
 
 // src/cli.ts
-import { mkdir as mkdir7 } from "node:fs/promises";
+import { mkdir as mkdir7, readFile as readFile17 } from "node:fs/promises";
 
 // src/track.ts
 import { mkdir as mkdir5, readFile as readFile15, writeFile as writeFile4 } from "node:fs/promises";
@@ -3360,11 +3478,20 @@ async function runNames(dir, flags2) {
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
     console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join17(dir, NAMES_FILE)}`);
+  } else if (action === "check" && name) {
+    const texts = await readFile17(name, "utf8").then((raw) => JSON.parse(raw.replace(/^﻿/, ""))).catch(() => null);
+    if (!Array.isArray(texts)) {
+      console.log("not checked: the file must hold a JSON list of texts, one a record");
+      process.exitCode = 2;
+      return;
+    }
+    const held = await heldLocally(dir, texts.map((one2) => typeof one2 === "string" ? one2 : JSON.stringify(one2)));
+    console.log(JSON.stringify({ checked: texts.length, held }));
   } else if (!action || action === "list") {
     const names = await readNames(dir);
     console.log(names === null ? `${NAMES_FILE} could not be read, so every prompt counts as naming one` : names.length ? names.join("\n") : "no private names on this machine");
   } else {
-    console.log("usage: helper names [list] | names add <name> | names remove <name>");
+    console.log("usage: helper names [list] | names add <name> | names remove <name> | names check <file of JSON texts>");
     process.exitCode = 2;
   }
 }
