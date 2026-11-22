@@ -1,7 +1,7 @@
 // src/cli.ts
-import { spawn as spawn3 } from "node:child_process";
-import { homedir as homedir3, hostname as hostname2 } from "node:os";
-import { join as join17 } from "node:path";
+import { spawn as spawn4 } from "node:child_process";
+import { homedir as homedir4, hostname as hostname3 } from "node:os";
+import { join as join18 } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 
 // src/auth.ts
@@ -31,7 +31,7 @@ async function withLock(path, now, fn, waitMs = WAIT_MS) {
     const current = now + Date.now() - started;
     const modified = await stat(path).then((info) => info.mtimeMs, () => current);
     if (current - modified > STALE_MS) await rm(path, { force: true }).catch(() => void 0);
-    else await new Promise((resolve3) => setTimeout(resolve3, waitMs * (0.5 + Math.random())));
+    else await new Promise((resolve4) => setTimeout(resolve4, waitMs * (0.5 + Math.random())));
   }
   return null;
 }
@@ -73,7 +73,7 @@ async function writeAtomic(file, text) {
         await rm2(temp, { force: true });
         throw error;
       }
-      await new Promise((resolve3) => setTimeout(resolve3, 20 * (attempt + 1)));
+      await new Promise((resolve4) => setTimeout(resolve4, 20 * (attempt + 1)));
     }
   }
 }
@@ -102,8 +102,8 @@ async function pauseState(dir, now) {
 
 // src/transport.ts
 function assertSafeUrl(url) {
-  const { protocol, hostname: hostname3 } = new URL(url);
-  if (protocol !== "https:" && hostname3 !== "localhost" && hostname3 !== "127.0.0.1") throw new Error("capture needs an https url");
+  const { protocol, hostname: hostname4 } = new URL(url);
+  if (protocol !== "https:" && hostname4 !== "localhost" && hostname4 !== "127.0.0.1") throw new Error("capture needs an https url");
 }
 var isPersonDoor = (url) => URL.canParse(url) && new URL(url).pathname.replace(/\/+$/, "") === "/mcp";
 function workspaceAddress(given, held, command2) {
@@ -239,7 +239,7 @@ function parseCallback(address, state) {
   return url && code && url.searchParams.get("state") === state ? { code, iss: url.searchParams.get("iss") } : null;
 }
 function listen(state) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     let deliver = () => void 0;
     const callback = new Promise((done) => {
       deliver = done;
@@ -257,7 +257,7 @@ function listen(state) {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      resolve3({ server, port: typeof address === "object" && address ? address.port : 0, callback });
+      resolve4({ server, port: typeof address === "object" && address ? address.port : 0, callback });
     });
   });
 }
@@ -317,7 +317,7 @@ async function connect(options) {
     server.closeIdleConnections();
   }
 }
-var sleepFor = (ms) => new Promise((resolve3) => setTimeout(resolve3, ms));
+var sleepFor = (ms) => new Promise((resolve4) => setTimeout(resolve4, ms));
 var DEVICE_REDIRECT = "http://127.0.0.1/callback";
 async function connectDevice(options) {
   assertSafeUrl(options.url);
@@ -473,8 +473,8 @@ async function sessionSource(env, claudeArgs2) {
   const source = sourceOfArgs(args);
   return { source: source === "person" && SDK_ENTRY.test(entry) ? "maybe" : source, read: args !== null };
 }
-var run = (file, args) => new Promise((resolve3) => {
-  execFile(file, args, { timeout: LOOKUP_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve3(error ? null : stdout));
+var run = (file, args) => new Promise((resolve4) => {
+  execFile(file, args, { timeout: LOOKUP_MS, windowsHide: true, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve4(error ? null : stdout));
 });
 async function linuxArgs(wanted = isClaude) {
   let pid = process.ppid;
@@ -598,6 +598,9 @@ var SECRET_PATTERNS = [
   token(String.raw`[sr]k_(?:live|test)_[A-Za-z0-9]{16,}`),
   token(String.raw`hv[sbr]\.[A-Za-z0-9_-]{20,}`),
   token(String.raw`AIza[0-9A-Za-z_-]{35}`),
+  // GitHub's stateless tokens (ITM-6765): ghs_, the app id, then a JWT, about 520 chars with two dots. Ahead of the JWT
+  // rule, so the app id goes with it
+  token(String.raw`gh[pousr]_[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}`),
   token(String.raw`eyJ[A-Za-z0-9_-]{8,512}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}`),
   /\b[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:/@]{1,256}:[^\s/@]{1,256}@/gi,
   token(String.raw`gh[pousr]_[A-Za-z0-9]{30,}`),
@@ -614,7 +617,7 @@ function maskSecrets(text) {
 }
 
 // ../domain/src/rules.ts
-var RULE_VERSION = 2;
+var RULE_VERSION = 3;
 var USER_OR_PASSWORD_MAX = 256;
 function beforeLastAt(run2) {
   const secret = run2.slice(0, Math.max(0, run2.lastIndexOf("@")));
@@ -648,6 +651,8 @@ var RULES = [
   { type: "connection", pattern: /\b(?<pre>[a-z][a-z0-9+.-]{1,30}:\/\/)(?<secret>[^\s:/@'"]{16,256})(?=@)/gi },
   { type: "connection", pattern: /(?<![\w/.-])(?<secret>[\w.-]{1,64}:[^\s:/@'"]{8,128})(?=@[\w-]+(?:\.[a-z]{2,}|:\d))/gi },
   { type: "connection", pattern: /(?<pre>(?:\s-u\s+|--user[ =]))(?<secret>[^\s:]{1,64}:\S{4,128})/g },
+  // GitHub's stateless tokens (ITM-6765): ghs_, the app id, then a JWT with two dots. Ahead of jwt, so it's one github tag
+  { type: "github", pattern: token2(String.raw`gh[pousr]_[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}`) },
   { type: "jwt", pattern: token2(String.raw`eyJ[A-Za-z0-9_-]{8,4096}\.eyJ[A-Za-z0-9_-]{8,8192}\.[A-Za-z0-9_-]{8,4096}`) },
   { type: "key", pattern: token2(String.raw`sk-[A-Za-z0-9_-]{20,}`) },
   { type: "stripe", pattern: token2(String.raw`(?:[srp]k_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9+/=]{16,})`) },
@@ -1919,8 +1924,8 @@ async function installKey(dir) {
   await writeAtomic(file, randomBytes2(32).toString("hex"));
   return readFile8(file, "utf8");
 }
-var git = (cwd, args) => new Promise((resolve3) => {
-  execFile3("git", ["-C", cwd, ...args], { timeout: 1500 }, (error, stdout) => resolve3(error ? null : stdout.trim() || null));
+var git = (cwd, args) => new Promise((resolve4) => {
+  execFile3("git", ["-C", cwd, ...args], { timeout: 1500 }, (error, stdout) => resolve4(error ? null : stdout.trim() || null));
 });
 var gitRemote = (cwd) => git(cwd, ["remote", "get-url", "origin"]);
 var gitRoot = (cwd) => git(cwd, ["rev-parse", "--show-toplevel"]);
@@ -2129,7 +2134,7 @@ async function startPlace(input, deps) {
 var PLACE_WAIT_MS = 2e3;
 var placeInTime = (input, deps) => Promise.race([
   startPlace(input, deps).catch(() => ({})),
-  new Promise((resolve3) => setTimeout(() => resolve3({}), PLACE_WAIT_MS).unref())
+  new Promise((resolve4) => setTimeout(() => resolve4({}), PLACE_WAIT_MS).unref())
 ]);
 async function laterPart(dataDir2, session, cwd, part, wait) {
   const until = Date.now() + wait;
@@ -2138,7 +2143,7 @@ async function laterPart(dataDir2, session, cwd, part, wait) {
     const cached = mark ? await cachedFor(dataDir2, cwd).catch(() => null) : null;
     if (cached && cached.key === mark) return cachedContext(cached, dataDir2, cwd, part).text;
     if (Date.now() >= until) return null;
-    await new Promise((resolve3) => setTimeout(resolve3, 50));
+    await new Promise((resolve4) => setTimeout(resolve4, 50));
   }
 }
 async function handleHook(input, deps) {
@@ -2211,10 +2216,10 @@ var CONVERTERS = [
   { cmd: "magick", args: (input, output) => [input, "-quality", "82", output] },
   { cmd: "ffmpeg", args: (input, output) => ["-y", "-loglevel", "error", "-i", input, "-c:v", "libwebp", "-quality", "82", output] }
 ];
-var runCommand = (cmd, args) => new Promise((resolve3) => {
+var runCommand = (cmd, args) => new Promise((resolve4) => {
   execFile4(cmd, args, { timeout: RUN_MS, windowsHide: true }, (error) => {
-    if (!error) resolve3("ok");
-    else resolve3(error.code === "ENOENT" ? "missing" : "failed");
+    if (!error) resolve4("ok");
+    else resolve4(error.code === "ENOENT" ? "missing" : "failed");
   });
 });
 var isWebp = (bytes) => bytes.length > 12 && bytes[0] === 82 && bytes[1] === 73 && bytes[2] === 70 && bytes[3] === 70 && bytes[8] === 87 && bytes[9] === 69 && bytes[10] === 66 && bytes[11] === 80;
@@ -2415,7 +2420,7 @@ var EXPORT_VERSION = 3;
 var EXPORT_SPEC_URL = "https://commonrig.com/docs/data/export-format/";
 var MINE_NOTE = "Your own prompts with their replies, and every project, item, request, thread, doc, report, file record, schedule, learning, handover, milestone, checklist, environment record, build, tag, rig page and quota line you can see in this workspace. File bytes download from Files. Report pages are in the JSON.";
 var TEXT_FIELDS = ["description", "verbatim", "body", "plan", "outcome", "summary", "what", "decision", "ask", "text", "reply", "locator", "detail", "changes", "command"];
-var WORKED_OUT = { schedules: ["state"] };
+var WORKED_OUT = { schedules: ["state"], requests: ["waits_because", "words_from"] };
 var when = (value) => typeof value === "number" && value > 0 ? `${new Date(value).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
 function heading(part, row) {
   const num2 = typeof row.ref === "string" ? `${row.ref} ` : typeof row.num === "number" ? `#${row.num} ` : "";
@@ -2672,7 +2677,7 @@ async function runHarness(harness, brief, env = {}, dir = runnerDir()) {
   } catch {
     return { code: 127, tail: "Configure executor.json with command and args in your runner folder first" };
   }
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     const { command: command2, args } = how;
     const child = spawn(command2, args, { stdio: ["pipe", "pipe", "pipe"], shell: harness !== "custom" && process.platform === "win32", windowsHide: true, env: { ...process.env, ...env } });
     let tail = "";
@@ -2685,11 +2690,11 @@ async function runHarness(harness, brief, env = {}, dir = runnerDir()) {
     const limit = setTimeout(() => child.kill(), RUN_LIMIT_MS);
     child.on("error", (error) => {
       clearTimeout(limit);
-      resolve3({ code: 127, tail: `could not start ${command2}: ${error.message}` });
+      resolve4({ code: 127, tail: `could not start ${command2}: ${error.message}` });
     });
     child.on("close", (code) => {
       clearTimeout(limit);
-      resolve3({ code: code ?? 1, tail });
+      resolve4({ code: code ?? 1, tail });
     });
     child.stdin.end(brief);
   });
@@ -2958,7 +2963,7 @@ function postBehind(dir) {
 }
 
 // src/cli.ts
-import { mkdir as mkdir7, readFile as readFile17 } from "node:fs/promises";
+import { mkdir as mkdir7, readFile as readFile18 } from "node:fs/promises";
 
 // src/track.ts
 import { mkdir as mkdir5, readFile as readFile15, writeFile as writeFile4 } from "node:fs/promises";
@@ -3001,12 +3006,217 @@ async function handleTrack(mode, input, deps) {
   return JSON.stringify({ decision: "block", reason: askLine(counts) });
 }
 
+// src/sweep.ts
+import { execFile as execFile5, spawn as spawn3 } from "node:child_process";
+import { lstat, opendir, readFile as readFile16, realpath, rm as rm9, rmdir, unlink, writeFile as writeFile5 } from "node:fs/promises";
+import { homedir as homedir3, hostname as hostname2 } from "node:os";
+import { join as join16, relative, resolve as resolve2, sep as sep2 } from "node:path";
+
+// ../domain/src/artifacts.ts
+var ARTIFACT_HOST = /^[A-Za-z0-9][\w.-]{0,63}$/;
+var isArtifactHost = (host) => typeof host === "string" && ARTIFACT_HOST.test(host);
+var ARTIFACT_IDLE_MS = 3 * 24 * 60 * 60 * 1e3;
+var ARTIFACT_STUCK_MS = 2 * 24 * 60 * 60 * 1e3;
+var SWEEP_EVERY_MS = 6 * 60 * 60 * 1e3;
+var SWEEP_PLAIN_KINDS = ["scratch", "wip", "dev-target", "cargo-target"];
+
+// src/sweep.ts
+var SWEEP_STATE = "sweep-state.json";
+var SWEEP_HOSTS = "sweep-hosts.json";
+var MAX_ENTRIES = 2e6;
+var GIT_TIMEOUT_MS = 6e4;
+var realGit = (cwd, args) => new Promise((done) => {
+  execFile5("git", ["-C", cwd, ...args], { timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout) => {
+    const code = error ? typeof error.code === "number" ? error.code : 128 : 0;
+    done({ code, stdout: String(stdout ?? "") });
+  });
+});
+async function sweepHosts(dir, env = process.env) {
+  const from = (list) => Array.isArray(list) ? list.map(String).map((name) => name.trim()).filter(isArtifactHost).slice(0, 8) : [];
+  const said2 = from((env.COMMONRIG_HOSTS ?? "").split(","));
+  if (said2.length) return said2;
+  const saved = from(await readFile16(join16(dir, SWEEP_HOSTS), "utf8").then((text) => JSON.parse(text), () => null));
+  if (saved.length) return saved;
+  const own = hostname2().split(".")[0]?.toLowerCase() ?? "";
+  return isArtifactHost(own) ? [own] : [];
+}
+async function saveSweepHosts(dir, hosts) {
+  const names = hosts.map((name) => name.trim()).filter(isArtifactHost).slice(0, 8);
+  await writeFile5(join16(dir, SWEEP_HOSTS), JSON.stringify(names));
+  return names;
+}
+async function sweepDue(dir, now) {
+  const state = await readFile16(join16(dir, SWEEP_STATE), "utf8").then((text) => JSON.parse(text), () => null);
+  return !state || typeof state.ran_at !== "number" || now - state.ran_at >= SWEEP_EVERY_MS || state.ran_at > now;
+}
+async function takeSweep(dir, now) {
+  const taken = await withLock(join16(dir, "sweep.lock"), now, async () => {
+    if (!await sweepDue(dir, now)) return false;
+    await writeFile5(join16(dir, SWEEP_STATE), JSON.stringify({ ran_at: now }));
+    return true;
+  });
+  return taken === true;
+}
+function sweepBehind(dir) {
+  const child = spawn3(process.execPath, [process.argv[1], "sweep"], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_DATA: dir } });
+  child.on("error", () => void 0);
+  child.unref();
+}
+var sameHost = (hosts, host) => hosts.some((name) => name.toLowerCase() === host.toLowerCase());
+var flat = (path, platform) => {
+  const full = resolve2(path).replace(/[\\/]+$/, "");
+  return platform === "win32" ? full.toLowerCase() : full;
+};
+var within = (inner, outer, platform) => {
+  const a = flat(inner, platform);
+  const b = flat(outer, platform);
+  return a === b || a.startsWith(b.endsWith(sep2) ? b : b + sep2);
+};
+async function findLinks(root) {
+  const links = [];
+  const stack = [root];
+  let seen = 0;
+  while (stack.length) {
+    const folder = stack.pop();
+    const entries = await opendir(folder).catch(() => null);
+    if (!entries) continue;
+    for await (const entry of entries) {
+      seen += 1;
+      if (seen > MAX_ENTRIES) return null;
+      const path = join16(folder, entry.name);
+      if (entry.isSymbolicLink()) links.push(path);
+      else if (entry.isDirectory()) stack.push(path);
+    }
+  }
+  return links;
+}
+var unlinkLink = (path) => rmdir(path).catch(() => unlink(path));
+async function dropLinks(root) {
+  const links = await findLinks(root);
+  if (links === null) return false;
+  for (const link of links) {
+    const ok = await unlinkLink(link).then(() => true, () => false);
+    if (!ok) return false;
+  }
+  return (await findLinks(root))?.length === 0;
+}
+var stays = (reason) => ({ stamp: { stays: reason } });
+async function checkRow(row, deps) {
+  const { platform, cwd, home, git: git2 } = deps;
+  const info = await lstat(row.path).catch((error) => error.code === "ENOENT" || error.code === "ENOTDIR" ? "gone" : null);
+  if (info === "gone") return { stamp: { outcome: "already gone" } };
+  if (info === null) return { skip: true };
+  if (row.verdict === "stays") return stays(row.stays ?? "kept");
+  if (row.verdict === "gone") return stays("back on disk after it was gone");
+  if (info.isSymbolicLink()) return stays("a link: remove by hand");
+  if (!info.isDirectory()) return stays("not a folder");
+  if (within(cwd, row.path, platform)) return stays("in use by this session");
+  if (within(home, row.path, platform)) return stays("holds the home folder");
+  if (row.check === "clean-merged" && row.kind === "worktree") return checkWorktree(row.path, platform, git2);
+  if (!SWEEP_PLAIN_KINDS.includes(row.kind) || row.check) return stays(`${row.kind}: remove by hand`);
+  const holdsGit = await lstat(join16(row.path, ".git")).then(() => true, () => false);
+  if (holdsGit) return stays("holds a git checkout");
+  return {
+    act: async () => {
+      if (!await dropLinks(row.path)) return { stays: "junctions" };
+      await rm9(row.path, { recursive: true, force: false, maxRetries: 3, retryDelay: 200 });
+      return { outcome: "removed" };
+    }
+  };
+}
+async function checkWorktree(path, platform, git2) {
+  const parsed = await git2(path, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"]);
+  const [top, gitDir, common] = parsed.stdout.split(/\r?\n/);
+  if (parsed.code !== 0 || !top || !gitDir || !common) return stays("not a git worktree");
+  const real = async (p) => flat(await realpath(p).catch(() => p), platform);
+  if (await real(top) !== await real(path)) return stays("not the top of a worktree");
+  if (await real(gitDir) === await real(common)) return stays("a main checkout, not a linked worktree");
+  const status = await git2(path, ["status", "--porcelain=v1", "--untracked-files=normal"]);
+  if (status.code !== 0) return stays("git status failed");
+  if (status.stdout.trim()) return stays("dirty");
+  const list = await git2(path, ["worktree", "list", "--porcelain"]);
+  const here = await real(path);
+  const blocks = list.stdout.split(/\r?\n\r?\n/);
+  for (const block of blocks) {
+    const lines = block.split(/\r?\n/);
+    const tree = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+    if (tree && await real(tree) === here && lines.some((line) => line === "locked" || line.startsWith("locked "))) return stays("locked");
+  }
+  const head = await git2(path, ["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]);
+  let base = head.code === 0 ? head.stdout.trim() : "";
+  if (!base) {
+    for (const guess of ["origin/main", "origin/master"]) {
+      if ((await git2(path, ["rev-parse", "--verify", "-q", `refs/remotes/${guess}`])).code === 0) {
+        base = guess;
+        break;
+      }
+    }
+  }
+  if (!base) return stays("no remote default branch");
+  const merged = await git2(path, ["merge-base", "--is-ancestor", "HEAD", base]);
+  if (merged.code === 1) return stays("unlanded");
+  if (merged.code !== 0) return stays("merge check failed");
+  let links = [];
+  if (platform === "win32") {
+    links = await findLinks(path);
+    if (links === null) return stays("too large to walk");
+    for (const link of links) {
+      const tracked = await git2(path, ["ls-files", "--", relative(path, link).split(sep2).join("/")]);
+      if (tracked.code !== 0 || tracked.stdout.trim()) return stays("junctions");
+    }
+  }
+  const mainRepo = /[\\/]\.git$/.test(common) ? resolve2(common, "..") : common;
+  return {
+    act: async () => {
+      if (links?.length && !await dropLinks(path)) return { stays: "junctions" };
+      const removed = await git2(mainRepo, ["worktree", "remove", path]);
+      return removed.code === 0 ? { outcome: "removed" } : { stays: "git refused the remove" };
+    }
+  };
+}
+async function runSweep(deps) {
+  const hosts = deps.hosts.filter(isArtifactHost);
+  const result = { listed: 0, removed: 0, gone: 0, stays: 0, skipped: 0 };
+  if (!hosts.length) return result;
+  const said2 = JSON.parse(await deps.call({ sweep_hosts: hosts }));
+  const rows = Array.isArray(said2.sweep) ? said2.sweep : [];
+  result.listed = rows.length;
+  const local = { platform: deps.platform ?? process.platform, cwd: deps.cwd ?? process.cwd(), home: deps.home ?? homedir3(), git: deps.git ?? realGit };
+  const stamps = [];
+  for (const row of rows) {
+    if (!sameHost(hosts, row.host) || typeof row.path !== "string" || typeof row.num !== "number") {
+      result.skipped += 1;
+      continue;
+    }
+    const checked = await checkRow(row, local).catch(() => ({ skip: true }));
+    if ("skip" in checked) {
+      result.skipped += 1;
+      continue;
+    }
+    let stamp;
+    if ("act" in checked) {
+      if (deps.dryRun) {
+        result.removed += 1;
+        continue;
+      }
+      stamp = await checked.act().catch(() => ({ stays: "remove failed" }));
+    } else stamp = checked.stamp;
+    if (stamp.outcome === "removed") result.removed += 1;
+    else if (stamp.outcome === "already gone") result.gone += 1;
+    else result.stays += 1;
+    stamps.push({ item: row.num, host: row.host, path: row.path, ...stamp });
+  }
+  if (deps.dryRun || !stamps.length) return result;
+  const back = JSON.parse(await deps.call({ retired: stamps }));
+  return { ...result, stamped: back.stamped ?? 0 };
+}
+
 // src/release-keys.ts
 var RELEASE_KEYS = ["MCowBQYDK2VwAyEAi8y0ShXULz6qfSv9l7mpyj8fZqgZO1b00YJwYg6Yozc="];
 
 // src/where.ts
-import { mkdir as mkdir6, readFile as readFile16, realpath, rm as rm9, writeFile as writeFile5 } from "node:fs/promises";
-import { basename, dirname as dirname2, join as join16, resolve as resolve2 } from "node:path";
+import { mkdir as mkdir6, readFile as readFile17, realpath as realpath2, rm as rm10, writeFile as writeFile6 } from "node:fs/promises";
+import { basename, dirname as dirname2, join as join17, resolve as resolve3 } from "node:path";
 
 // src/release.ts
 import { createHash as createHash4, createPublicKey, verify } from "node:crypto";
@@ -3046,12 +3256,12 @@ function checkRelease(keys, manifestText, bundle, signature) {
 // src/where.ts
 var WHERE_FILE = "helper.json";
 var WHERE_KEPT_FILE = "where-kept.json";
-var read3 = (path) => readFile16(path).catch(() => null);
+var read3 = (path) => readFile17(path).catch(() => null);
 async function launcherProblem(launcher, keys) {
   if (!launcher) return "no launcher path";
   if (keys.length === 0) return "not a signed release: no release key pinned";
   const here = dirname2(launcher);
-  const manifestText = (await read3(join16(here, "release.json")))?.toString("utf8") ?? null;
+  const manifestText = (await read3(join17(here, "release.json")))?.toString("utf8") ?? null;
   let bundle = null;
   let files = {};
   try {
@@ -3060,7 +3270,7 @@ async function launcherProblem(launcher, keys) {
     if (parsed?.files && typeof parsed.files === "object") files = parsed.files;
   } catch {
   }
-  const check = checkRelease(keys, manifestText, bundle ? await read3(join16(here, bundle)) : null, (await read3(join16(here, "release.sig")))?.toString("utf8") ?? null);
+  const check = checkRelease(keys, manifestText, bundle ? await read3(join17(here, bundle)) : null, (await read3(join17(here, "release.sig")))?.toString("utf8") ?? null);
   if (!check.ok) return `not a signed release: ${check.reason}`;
   const name = basename(launcher);
   if (name === check.manifest.bundle || typeof files[name] !== "string") return "not run through a release launcher";
@@ -3068,9 +3278,9 @@ async function launcherProblem(launcher, keys) {
   if (!bytes || releaseDigest(bytes) !== files[name]) return `${name} is not the released ${check.manifest.version}`;
   return null;
 }
-var realLauncher = (launcher) => launcher ? realpath(launcher).catch(() => launcher) : Promise.resolve(launcher);
+var realLauncher = (launcher) => launcher ? realpath2(launcher).catch(() => launcher) : Promise.resolve(launcher);
 var sameFolder = (a, b) => {
-  const norm = (path) => process.platform === "win32" ? resolve2(path).toLowerCase() : resolve2(path);
+  const norm = (path) => process.platform === "win32" ? resolve3(path).toLowerCase() : resolve3(path);
   return norm(a) === norm(b);
 };
 async function noteWhere(args) {
@@ -3078,22 +3288,22 @@ async function noteWhere(args) {
   const problem = await launcherProblem(launcher, args.keys);
   const why = problem ?? ((await readCredentials(args.data))?.refresh_token ? null : `not signed in here (${args.data})`);
   if (why) {
-    await mkdir6(args.data, { recursive: true }).then(() => writeFile5(join16(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
+    await mkdir6(args.data, { recursive: true }).then(() => writeFile6(join17(args.data, WHERE_KEPT_FILE), JSON.stringify({ at: new Date(args.now).toISOString(), why }))).catch(() => void 0);
     return { wrote: false, why };
   }
   const text = JSON.stringify({ path: launcher, data: args.data });
-  const file = join16(args.home, WHERE_FILE);
-  if (await readFile16(file, "utf8").catch(() => null) !== text) {
+  const file = join17(args.home, WHERE_FILE);
+  if (await readFile17(file, "utf8").catch(() => null) !== text) {
     await mkdir6(args.home, { recursive: true });
     await writeAtomic(file, text);
   }
-  await rm9(join16(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
+  await rm10(join17(args.data, WHERE_KEPT_FILE), { force: true }).catch(() => void 0);
   return { wrote: true };
 }
 async function whereStatus(home, data) {
   let named;
   try {
-    named = JSON.parse(await readFile16(join16(home, WHERE_FILE), "utf8")).data;
+    named = JSON.parse(await readFile17(join17(home, WHERE_FILE), "utf8")).data;
   } catch {
     return { helper_json: "missing", kept_why: await keptWhy(data) };
   }
@@ -3103,7 +3313,7 @@ async function whereStatus(home, data) {
 }
 async function keptWhy(data) {
   try {
-    const value = JSON.parse(await readFile16(join16(data, WHERE_KEPT_FILE), "utf8")).why;
+    const value = JSON.parse(await readFile17(join17(data, WHERE_KEPT_FILE), "utf8")).why;
     return typeof value === "string" ? value : null;
   } catch {
     return null;
@@ -3115,7 +3325,7 @@ var MAX_INPUT_BYTES = 8 * 1024 * 1024;
 var TRACK_TIMEOUT_MS = 2500;
 var ARTIFACTS_TIMEOUT_MS = 1e4;
 var START_DEADLINE_MS = 8e3;
-var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join17(homedir3(), ".commonrig");
+var dataDir = () => process.env.CLAUDE_PLUGIN_DATA || join18(homedir4(), ".commonrig");
 async function transport(dir) {
   const held = await readCredentials(dir);
   if (!held?.refresh_token) return null;
@@ -3127,7 +3337,7 @@ async function transport(dir) {
 }
 function openBrowser(url) {
   const [command2, ...args] = process.platform === "win32" ? ["rundll32", "url.dll,FileProtocolHandler"] : process.platform === "darwin" ? ["open"] : ["xdg-open"];
-  const child = spawn3(command2, [...args, url], { stdio: "ignore", detached: true });
+  const child = spawn4(command2, [...args, url], { stdio: "ignore", detached: true });
   child.on("error", () => void 0);
   child.unref();
 }
@@ -3136,7 +3346,7 @@ async function pastedLine() {
   for await (const line of lines) if (line.trim()) return line;
   return null;
 }
-var laneDir = () => process.env.COMMONRIG_LANE_DIR || join17(homedir3(), ".commonrig-lane");
+var laneDir = () => process.env.COMMONRIG_LANE_DIR || join18(homedir4(), ".commonrig-lane");
 function machineAsks(primary, args, runnerExtra = {}) {
   const wants = (kind) => kind === primary || args.includes(`--${kind}`) || args.includes("--all");
   const asks = [];
@@ -3152,7 +3362,7 @@ async function runDevice(url, asks, args) {
     url,
     asks,
     show: ({ code, url: page, complete, minutes }) => {
-      console.log(`To sign ${hostname2()} in, open ${page} on any device signed in to CommonRig and enter:
+      console.log(`To sign ${hostname3()} in, open ${page} on any device signed in to CommonRig and enter:
 
     ${code}
 
@@ -3306,7 +3516,7 @@ ${authorizeUrl}`);
   const allowed = asked ?? null;
   const ask = once && process.stdin.isTTY ? async (question) => {
     const lines = createInterface2({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise((resolve3) => lines.question(question, resolve3));
+    const answer = await new Promise((resolve4) => lines.question(question, resolve4));
     lines.close();
     return /^y(es)?$/i.test(answer.trim());
   } : null;
@@ -3320,7 +3530,7 @@ ${authorizeUrl}`);
   console.log(`runner polling every ${RUNNER_POLL_MS / 6e4} minutes${allowed ? `, running ${allowed} on records set to execute` : ", prompting only"}. Ctrl+C stops it`);
   for (; ; ) {
     await runnerOnce(dir, allowed, io).catch((error) => console.log(`poll failed: ${error instanceof Error ? error.message : "unknown error"}`));
-    await new Promise((resolve3) => setTimeout(resolve3, RUNNER_POLL_MS));
+    await new Promise((resolve4) => setTimeout(resolve4, RUNNER_POLL_MS));
   }
 }
 async function readStdin() {
@@ -3333,7 +3543,7 @@ async function readStdin() {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-var noteWhere2 = () => noteWhere({ home: join17(homedir3(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
+var noteWhere2 = () => noteWhere({ home: join18(homedir4(), ".commonrig"), launcher: process.argv[1] ?? "", data: dataDir(), keys: RELEASE_KEYS, now: Date.now() });
 async function runTrack(mode) {
   try {
     const input = JSON.parse(await readStdin());
@@ -3361,6 +3571,27 @@ async function runArtifacts(flags2) {
   const args = { ...session ? { client_session: session } : {}, ...retired ? { retired } : {} };
   console.log(await mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "artifact_check", args));
 }
+async function runSweepCommand(dir, flags2) {
+  const at = flags2.indexOf("--hosts");
+  if (at >= 0) {
+    const saved = await saveSweepHosts(dir, (flags2[at + 1] ?? "").split(","));
+    console.log(saved.length ? `this machine sweeps rows on: ${saved.join(", ")}` : "no host names given: --hosts laptop,build-box");
+    if (!saved.length) process.exitCode = 2;
+    return;
+  }
+  const held = await readCredentials(dir);
+  if (!held?.refresh_token) {
+    console.log(JSON.stringify({ signed_in: false }));
+    return;
+  }
+  const dryRun = flags2.includes("--dry-run");
+  if (!flags2.includes("--now") && !dryRun && !await takeSweep(dir, Date.now())) {
+    console.log(JSON.stringify({ due: false }));
+    return;
+  }
+  const call = (args) => mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "artifact_check", args);
+  console.log(JSON.stringify(await runSweep({ call, hosts: await sweepHosts(dir), dryRun })));
+}
 async function runCleanHarness(flags2) {
   const dir = dataDir();
   const held = await readCredentials(dir);
@@ -3387,7 +3618,7 @@ async function runDecide(capture, flags2) {
   console.log(answer ?? JSON.stringify({ ok: false, error: "unavailable" }));
 }
 function flushBehind(dir) {
-  const child = spawn3(process.execPath, [process.argv[1], "flush"], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_DATA: dir } });
+  const child = spawn4(process.execPath, [process.argv[1], "flush"], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, CLAUDE_PLUGIN_DATA: dir } });
   child.on("error", () => void 0);
   child.unref();
 }
@@ -3426,6 +3657,7 @@ async function runHook(flags2) {
     if (out) await new Promise((done) => process.stdout.write(out, () => done()));
     if (fallback && out === fallback) process.exit(0);
     if (!later && input.hook_event_name === "UserPromptSubmit") await noteWhere2().catch(() => void 0);
+    if (!later && input.hook_event_name === "SessionStart" && (await readCredentials(dataDir()).catch(() => null))?.refresh_token && await sweepDue(dataDir(), Date.now())) sweepBehind(dataDir());
   } catch {
     await recordDrop(dataDir(), "hook_error").catch(() => void 0);
     process.exitCode = 0;
@@ -3459,7 +3691,7 @@ async function runNeverSend(dir, args) {
     await writeNeverSend(dir, { ...read4, mode: rest[0] });
     console.log(rest[0] === "drop" ? "never-send: a prompt or reply with a listed word stays on this machine" : "never-send: listed words are swapped for [withheld] before anything is sent");
   } else if (action === "list") {
-    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join17(dir, "never-send.json") }));
+    console.log(JSON.stringify({ mode: read4.mode, words: read4.words, file: join18(dir, "never-send.json") }));
   } else {
     console.log('usage: helper never-send add <word or "a phrase"...> | remove <word...> | mode drop|mask | list');
     process.exitCode = 2;
@@ -3477,9 +3709,9 @@ async function runNames(dir, flags2) {
     if (!kept) return;
     const live = await transport(dir);
     if (live) await flush(dir, live, Date.now(), true).catch(() => void 0);
-    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join17(dir, NAMES_FILE)}`);
+    console.log(`${action === "add" ? "added" : "removed"}. ${kept.length} private name${kept.length === 1 ? "" : "s"} on this machine, in ${join18(dir, NAMES_FILE)}`);
   } else if (action === "check" && name) {
-    const texts = await readFile17(name, "utf8").then((raw) => JSON.parse(raw.replace(/^﻿/, ""))).catch(() => null);
+    const texts = await readFile18(name, "utf8").then((raw) => JSON.parse(raw.replace(/^﻿/, ""))).catch(() => null);
     if (!Array.isArray(texts)) {
       console.log("not checked: the file must hold a JSON list of texts, one a record");
       process.exitCode = 2;
@@ -3532,13 +3764,15 @@ async function runCommand2(command2, flags2) {
   } else if (command2 === "status") {
     const list = await readNeverSend(dir);
     const neverSend = list === "unreadable" ? "unreadable: holding everything back" : { mode: list.mode, words: list.words.length };
-    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join17(homedir3(), ".commonrig"), dir) }));
+    console.log(JSON.stringify({ signed_in: Boolean(await transport(dir)), pause: await pauseState(dir, Date.now()), never_send: neverSend, spool: await spoolStatus(dir), ...await whereStatus(join18(homedir4(), ".commonrig"), dir) }));
   } else if (command2 === "names") {
     await runNames(dir, flags2);
   } else if (command2 === "quota") {
     await runQuota(flags2);
   } else if (command2 === "artifacts") {
     await runArtifacts(flags2);
+  } else if (command2 === "sweep") {
+    await runSweepCommand(dir, flags2);
   } else if (command2 === "clean-harness") {
     await runCleanHarness(flags2);
   } else if (command2 === "decide") {
@@ -3551,7 +3785,7 @@ async function runCommand2(command2, flags2) {
     const live = await transport(dir);
     console.log(live ? JSON.stringify(await flush(dir, live, Date.now())) : "not signed in: rows stay in the spool");
   } else {
-    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url>");
+    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | sweep [--now] [--dry-run] [--hosts a,b] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url>");
     process.exitCode = 2;
   }
 }
