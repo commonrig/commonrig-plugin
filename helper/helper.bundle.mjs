@@ -615,6 +615,7 @@ var SECRET_PATTERNS = [
 function maskSecrets(text) {
   return SECRET_PATTERNS.reduce((out, pattern) => out.replace(pattern, "[masked]"), text);
 }
+var MARKS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31].map((code) => String.fromCharCode(code));
 
 // ../domain/src/rules.ts
 var RULE_VERSION = 3;
@@ -824,7 +825,7 @@ var ACCEPTANCE_RULE = {
     source: "CommonRig starter rules"
   },
   body: [
-    "kind: decide for a choice (question, two or more options, default_if_silent), try for something to test (steps needed), fyi to know.",
+    "kind: decide for a choice (question, two or more options, default_if_silent), try for something to test (steps needed), fyi for a sign-off (what_you_see become the things they check), feedback when you want their view before going on (question says what you ask; it never closes the item).",
     "accept: one line, the thing itself. what_you_see: bullets from the person's side, never code mechanics.",
     "steps: numbered, each with a link (#/... in the app, or https), and minutes. watch_for for caveats, on_accept for what follows.",
     "evidence: file (screenshots), report, finding, thread, ci (a sha with a run on the item), url, each with a short caption. Moving in attaches the item's own reports, findings, files, threads and CI by itself."
@@ -1961,11 +1962,23 @@ function ancestors(path) {
   const found = parts.map((_, index) => parts.slice(0, index + 1).join("/")).filter(Boolean);
   return /^[\\/]{2}[^\\/]/.test(path) ? found.map((folder) => `/${folder}`) : found;
 }
+function repoDirs(repoHash, top, cwd) {
+  if (!repoHash || !top) return [];
+  const clean = (path) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const root = clean(top);
+  const here = clean(cwd);
+  if (!here.startsWith(`${root}/`)) return [];
+  const parts = here.slice(root.length + 1).split("/").filter(Boolean);
+  const out = [];
+  for (let at = parts.length; at > 0 && out.length < 12; at--) out.push(createHash3("sha256").update(`${repoHash}
+${parts.slice(0, at).join("/")}`).digest("hex"));
+  return out;
+}
 async function repoKeys(cwd, key, remote = gitRemote, root = gitRoot) {
   const [url, top] = cwd ? await Promise.all([remote(cwd), root(cwd)]) : [null, null];
   const repoHash = url ? createHash3("sha256").update(normaliseRemote2(url)).digest("hex") : null;
   const hashed = repoHash ? [repoHash] : [];
-  return { repoHash, pin: [...hashed, pathKey(top ?? cwd, key)], candidates: [...hashed, ...ancestors(cwd).map((path) => pathKey(path, key))] };
+  return { repoHash, pin: [...hashed, pathKey(top ?? cwd, key)], candidates: [...hashed, ...ancestors(cwd).map((path) => pathKey(path, key))], dirs: repoDirs(repoHash, top, cwd) };
 }
 var labelOf = (folder, list) => {
   if (!folder) return null;
@@ -1974,13 +1987,14 @@ var labelOf = (folder, list) => {
 };
 async function where(input, session, state, key, deps, list) {
   const cwd = str2(input.cwd) ?? "";
-  const { repoHash, candidates } = await repoKeys(cwd, key, deps.remote, deps.root);
+  const { repoHash, candidates, dirs } = await repoKeys(cwd, key, deps.remote, deps.root);
   const folder = labelOf(cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? null, list);
   return {
     pauseKeys: candidates,
     context: {
       client_session: session,
       repo_hash: repoHash,
+      ...dirs.length ? { repo_dirs: dirs } : {},
       cwd_label: folder ? maskText(folder, key).text.slice(0, 128) : null,
       model: shaped(input.model, MODEL2) ?? state.model ?? null,
       at: deps.now()
@@ -2969,7 +2983,7 @@ import { mkdir as mkdir7, readFile as readFile18 } from "node:fs/promises";
 import { mkdir as mkdir5, readFile as readFile15, writeFile as writeFile4 } from "node:fs/promises";
 import { join as join15 } from "node:path";
 var SESSION_ID2 = /^[\w.:-]{1,128}$/;
-var MARKS = "track-asked.json";
+var MARKS2 = "track-asked.json";
 var MAX_MARKS = 200;
 var plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
 function askLine(counts) {
@@ -2978,7 +2992,7 @@ function askLine(counts) {
 }
 async function readMarks(dir) {
   try {
-    const parsed = JSON.parse(await readFile15(join15(dir, MARKS), "utf8"));
+    const parsed = JSON.parse(await readFile15(join15(dir, MARKS2), "utf8"));
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
@@ -2987,7 +3001,7 @@ async function readMarks(dir) {
 async function writeMarks(dir, marks) {
   const kept = Object.entries(marks).slice(-MAX_MARKS);
   await mkdir5(dir, { recursive: true });
-  await writeFile4(join15(dir, MARKS), JSON.stringify(Object.fromEntries(kept)));
+  await writeFile4(join15(dir, MARKS2), JSON.stringify(Object.fromEntries(kept)));
 }
 async function handleTrack(mode, input, deps) {
   const session = typeof input.session_id === "string" && SESSION_ID2.test(input.session_id) ? input.session_id : null;
@@ -3021,6 +3035,11 @@ var SWEEP_EVERY_MS = 6 * 60 * 60 * 1e3;
 var SWEEP_PLAIN_KINDS = ["scratch", "wip", "dev-target", "cargo-target"];
 
 // src/sweep.ts
+var artifactCheckArgs = (flags2, session, retired) => ({
+  ...session ? { client_session: session } : {},
+  ...retired ? { retired } : {},
+  ...flags2.includes("--open") ? { open: true } : {}
+});
 var SWEEP_STATE = "sweep-state.json";
 var SWEEP_HOSTS = "sweep-hosts.json";
 var MAX_ENTRIES = 2e6;
@@ -3568,7 +3587,7 @@ async function runArtifacts(flags2) {
     console.log(JSON.stringify({ signed_in: false }));
     return;
   }
-  const args = { ...session ? { client_session: session } : {}, ...retired ? { retired } : {} };
+  const args = artifactCheckArgs(flags2, session, retired);
   console.log(await mcpCall({ url: held.url, getToken: () => accessToken(dir, Date.now()), onUnauthorized: () => dropAccessToken(dir), timeoutMs: ARTIFACTS_TIMEOUT_MS }, "artifact_check", args));
 }
 async function runSweepCommand(dir, flags2) {
@@ -3785,7 +3804,7 @@ async function runCommand2(command2, flags2) {
     const live = await transport(dir);
     console.log(live ? JSON.stringify(await flush(dir, live, Date.now())) : "not signed in: rows stay in the spool");
   } else {
-    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] | sweep [--now] [--dry-run] [--hosts a,b] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url>");
+    console.log("usage: helper hook | connect <url> [--no-browser] | disconnect | pause [--repo] | resume [--repo] | never-send add|remove|mode|list | names [add|remove <name>] | status | quota [--now] | statusline | flush | artifacts [--session <id>] [--retired] [--open] | sweep [--now] [--dry-run] [--hosts a,b] | clean-harness [--apply] | decide --preset <name> --state-file <input.json> [--caller <label>] [--runner] | connect <url> --decisions | put <file> <upload link> | raise --title <words> [--kind] [--project] [--fingerprint] | raise connect <url> | runner --once|--loop [--execute claude|codex|opencode|custom] | runner connect <url>");
     process.exitCode = 2;
   }
 }
