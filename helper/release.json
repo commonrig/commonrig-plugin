@@ -1,9 +1,9 @@
 {
   "name": "commonrig",
-  "version": "0.25.6",
+  "version": "0.25.7",
   "bundle": "helper.bundle.mjs",
   "files": {
     "helper.mjs": "ce1b4e1ebf835592519468edb92d90e06fc167a743d79ebcebc9505b9e8c1829",
-    "helper.bundle.mjs": "125a6e638d964e12fb3ca7a671692fa5ded8aa42a32f8724f67a899bd8eb29d8"
+    "helper.bundle.mjs": "ce3592aba7c5d110cabd0b6b33d3dda45bc876dafb03139cb21c84778a6b1761"
   }
 }

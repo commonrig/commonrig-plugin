@@ -1191,6 +1191,36 @@ function agentShaped(text) {
 }
 var SESSION_BRIEF = /^\s*Background \(from the session that started this one\):\r?\n[\s\S]*?\n\s*Task:\s*\r?\n/;
 
+// ../domain/src/record-ids.ts
+var ID_PREFIXES = {
+  item: "ITM",
+  request: "REQ",
+  report: "RPT",
+  handover: "HND",
+  doc: "DOC",
+  file: "FIL",
+  schedule: "SCH",
+  thread: "THR",
+  card: "CRD",
+  rule: "RUL",
+  package: "PKG",
+  milestone: "MIL",
+  checklist: "CHK",
+  test: "TST",
+  host: "HST",
+  service: "SVC",
+  job: "JOB",
+  runbook: "RBK",
+  placement: "PLC",
+  account: "ACC",
+  notice: "NTC",
+  build: "BLD",
+  tag: "TAG",
+  page: "PAG"
+};
+var PREFIX_LIST = /* @__PURE__ */ Object.values(ID_PREFIXES);
+var isOwnPrefix = (prefix) => PREFIX_LIST.includes(prefix.toUpperCase());
+
 // ../domain/src/auto-settle.ts
 var CLAIMS_RELEASE_MAX_HOURS = 24 * 14;
 
@@ -2432,6 +2462,7 @@ import { dirname, join as join13, resolve, sep } from "node:path";
 // ../domain/src/export-tree.ts
 var TITLES = {
   projects: "Projects",
+  types: "Item types",
   items: "Items",
   requests: "Requests",
   threads: "Threads",
@@ -2457,9 +2488,9 @@ var TITLES = {
   audit: "Rights trail"
 };
 var EXPORT_FORMAT = "commonrig-export";
-var EXPORT_VERSION = 5;
+var EXPORT_VERSION = 6;
 var EXPORT_SPEC_URL = "https://commonrig.com/docs/data/export-format/";
-var MINE_NOTE = "Your own prompts with their replies, and every project, item, request, thread, doc, report, file record, schedule, learning, handover, milestone, checklist, environment record, build, tag, rig page and quota line you can see in this workspace. File bytes download from Files. Report pages are in the JSON.";
+var MINE_NOTE = "Your own prompts with their replies, and every project, item type, item, request, thread, doc, report, file record, schedule, learning, handover, milestone, checklist, environment record, build, tag, rig page and quota line you can see in this workspace. File bytes download from Files. Report pages are in the JSON.";
 var TEXT_FIELDS = ["description", "verbatim", "body", "plan", "outcome", "summary", "what", "decision", "ask", "text", "reply", "locator", "detail", "changes", "command"];
 var WORKED_OUT = { schedules: ["state"], requests: ["waits_because", "words_from"] };
 var when = (value) => typeof value === "number" && value > 0 ? `${new Date(value).toISOString().slice(0, 16).replace("T", " ")} UTC` : "";
@@ -2472,7 +2503,7 @@ function heading(part, row) {
 }
 var quoted = (text) => text.split("\n").map((line) => `> ${line}`).join("\n");
 function facts(row) {
-  return ["status", "kind", "project_id", "by", "yours", "created", "updated", "at", "capture", "visibility"].filter((key) => row[key] !== void 0 && row[key] !== null && row[key] !== "").map((key) => `${key}: ${key === "created" || key === "updated" || key === "at" ? when(row[key]) : String(row[key])}`).join(" | ");
+  return ["status", "kind", "type", "stage", "project_id", "by", "yours", "created", "updated", "at", "capture", "visibility"].filter((key) => row[key] !== void 0 && row[key] !== null && row[key] !== "").map((key) => `${key}: ${key === "created" || key === "updated" || key === "at" ? when(row[key]) : String(row[key])}`).join(" | ");
 }
 function said(list, label) {
   if (!Array.isArray(list) || !list.length) return [];
@@ -2506,8 +2537,13 @@ var FOLDER_OF_PREFIX = {
   TAG: "tags",
   PAG: "pages"
 };
+var folderOf = (ref) => {
+  const prefix = ref.split("-")[0] ?? "";
+  return FOLDER_OF_PREFIX[prefix] ?? (/^[A-Z]{3}$/.test(prefix) && prefix !== "SES" && !isOwnPrefix(prefix) ? "items" : void 0);
+};
 var TYPE_OF_PART = {
   projects: "project",
+  types: "item_type",
   items: "item",
   requests: "request",
   threads: "thread",
@@ -2533,9 +2569,9 @@ var TYPED_WORD = /(?<![\w/#&|[-])(?:ITM|REQ|RPT|HND|DOC|FIL|SCH|THR|CRD|RUL|PKG|
 function refsOf(row) {
   const raw = row.refs;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-  return Object.entries(raw).map(([key, ref]) => [Number(key), ref]).filter((pair) => isNum(pair[0]) && typeof pair[1] === "string" && FOLDER_OF_PREFIX[pair[1].split("-")[0] ?? ""] !== void 0).sort((a, b) => a[0] - b[0]);
+  return Object.entries(raw).map(([key, ref]) => [Number(key), ref]).filter((pair) => isNum(pair[0]) && typeof pair[1] === "string" && folderOf(pair[1]) !== void 0).sort((a, b) => a[0] - b[0]);
 }
-var wikilink = (num2, ref) => `[[${FOLDER_OF_PREFIX[ref.split("-")[0] ?? ""]}/${num2}|${ref}]]`;
+var wikilink = (num2, ref) => `[[${folderOf(ref)}/${num2}|${ref}]]`;
 var projectLink = (id) => `[[projects/${safeName(id)}|${id.replace(/[[\]|]/g, "")}]]`;
 var yaml = (value) => typeof value === "string" ? JSON.stringify(value) : String(value);
 var yamlList = (values) => `[${values.map((value) => yaml(value)).join(", ")}]`;
@@ -2591,6 +2627,9 @@ function recordMarkdown(part, row) {
     const value = row[field];
     if (typeof value === "string" && value.trim()) out.push(`${field}:`, "", quoted(linkedText(value, byRef)), "");
   }
+  if (row.values && typeof row.values === "object" && !Array.isArray(row.values) && Object.keys(row.values).length) {
+    out.push("values:", "", ...Object.entries(row.values).map(([key, value]) => `- ${key}: ${typeof value === "string" ? value.replace(/\s+/g, " ") : JSON.stringify(value)}`), "");
+  }
   const relinked = (list) => Array.isArray(list) ? list.map((one2) => one2 && typeof one2 === "object" && typeof one2.body === "string" ? { ...one2, body: linkedText(one2.body, byRef) } : one2) : list;
   out.push(...said(relinked(row.notes), "notes"), ...said(relinked(row.messages), "messages"));
   const project = part !== "projects" && typeof row.project_id === "string" && row.project_id ? row.project_id : null;
@@ -2612,6 +2651,8 @@ function stem(part, row) {
   switch (part) {
     case "projects":
       return `projects/${safeName(row.id)}`;
+    case "types":
+      return `types/${safeName(row.key)}`;
     case "doc_versions":
       return `docs/${Number(row.doc_num)}.v${Number(row.version)}`;
     case "report_versions":
