@@ -466,6 +466,14 @@ function sourceOfArgs(args) {
   if (streamed && !flags2.some((arg) => arg === "--permission-prompt-tool" || arg.startsWith("--permission-prompt-tool="))) return "maybe";
   return "person";
 }
+var FRONT_ENDS = /^(?:cli|claude-desktop|claude-vscode|claude-jetbrains)$/;
+function entrypointOf(env, source) {
+  const entry = env.CLAUDE_CODE_ENTRYPOINT ?? "";
+  if (entry === PRINT_ENTRY || source === "agent") return "print";
+  if (SDK_ENTRY.test(entry)) return "sdk";
+  if (FRONT_ENDS.test(entry)) return "cli";
+  return entry ? "other" : void 0;
+}
 async function sessionSource(env, claudeArgs2) {
   const entry = env.CLAUDE_CODE_ENTRYPOINT ?? "";
   if (entry === PRINT_ENTRY) return { source: "agent", read: true };
@@ -1185,6 +1193,17 @@ var SESSION_BRIEF = /^\s*Background \(from the session that started this one\):\
 
 // ../domain/src/auto-settle.ts
 var CLAIMS_RELEASE_MAX_HOURS = 24 * 14;
+
+// ../domain/src/close-intent.ts
+var POLITE = String.raw`(?:(?:please|pls|ok|okay|yes|thanks|go ahead and)[, ]+)*`;
+var VERB = String.raw`(?:close|tick off|sign off)`;
+var DONE = String.raw`(?:done|complete|completed|finished|verified)`;
+var CONFIRM = String.raw`(?:\s*(?:,|-|and)\s*(?:both|all|the)?\s*(?:(?:acts|steps|actions|items)\s*)?(?:(?:are|is)\s*)?${DONE}(?:\s*and\s*${DONE})?)?`;
+var SHAPES = [
+  new RegExp(`^${POLITE}${VERB}\\s+TARGET(?:\\s+(?:as\\s+)?done)?${CONFIRM}$`),
+  new RegExp(`^${POLITE}mark\\s+TARGET\\s+(?:as\\s+)?done${CONFIRM}$`),
+  new RegExp(`^${POLITE}TARGET(?:\\s+(?:is|are|now))*(?:\\s+all)?\\s+${DONE}(?:\\s*,\\s*(?:please\\s+)?close(?:\\s+it)?)?$`)
+];
 
 // ../domain/src/library.ts
 var CATEGORY_WORDS = {
@@ -2030,11 +2049,19 @@ ${prompt}`).digest("hex").slice(0, 32);
   const source = state.source ?? looked?.source ?? "person";
   const now = looked ? await readSession(dataDir2, session) : state;
   await writeSession(dataDir2, session, { ...now, promptId, skipped: void 0, source: looked && !looked.read ? void 0 : source });
-  await spoolPrompt(dataDir2, prompt, screened.text, { ...context, client_prompt_id: promptId }, source, key, pauseKeys);
+  await spoolPrompt(dataDir2, prompt, screened.text, { ...context, client_prompt_id: promptId }, source, key, pauseKeys, { entrypoint: entrypointOf(deps.env ?? process.env, source), inbound: inboundOf(input) });
 }
-async function spoolPrompt(dataDir2, raw, screenedText, context, source, key, pauseKeys) {
+function inboundOf(input) {
+  const { origin } = input;
+  if (origin === void 0 || origin === null) return false;
+  if (typeof origin !== "object" || Array.isArray(origin)) return true;
+  const { kind } = origin;
+  return typeof kind !== "string" || kind !== "human";
+}
+async function spoolPrompt(dataDir2, raw, screenedText, context, source, key, pauseKeys, how = {}) {
   const said2 = promptRow(screenedText, context, key);
-  const row = source === "person" ? said2 : { ...said2, said_by: source };
+  const named = { ...said2, ...how.entrypoint ? { entrypoint: how.entrypoint } : {}, ...how.inbound ? { inbound: true } : {} };
+  const row = source === "person" ? named : { ...named, said_by: source };
   await spoolRow(dataDir2, await namesPrivate(dataDir2, raw) ? { ...row, private_name: true } : row, pauseKeys);
 }
 async function keepMidTurn(message, input, session, state, key, deps) {
@@ -2047,7 +2074,7 @@ async function keepMidTurn(message, input, session, state, key, deps) {
   const { context, pauseKeys } = await where(input, session, state, key, deps, list);
   if (await isPaused(dataDir2, pauseKeys, deps.now())) return recordDrop(dataDir2, "paused");
   const source = state.source ?? "person";
-  await spoolPrompt(dataDir2, message.text, screened.text, { ...context, client_prompt_id: message.id, at: message.at ?? context.at }, source, key, pauseKeys);
+  await spoolPrompt(dataDir2, message.text, screened.text, { ...context, client_prompt_id: message.id, at: message.at ?? context.at }, source, key, pauseKeys, { entrypoint: entrypointOf(deps.env ?? process.env, source) });
 }
 async function keepMidTurns(input, session, key, deps) {
   const path = str2(input.transcript_path);
@@ -2430,7 +2457,7 @@ var TITLES = {
   audit: "Rights trail"
 };
 var EXPORT_FORMAT = "commonrig-export";
-var EXPORT_VERSION = 3;
+var EXPORT_VERSION = 5;
 var EXPORT_SPEC_URL = "https://commonrig.com/docs/data/export-format/";
 var MINE_NOTE = "Your own prompts with their replies, and every project, item, request, thread, doc, report, file record, schedule, learning, handover, milestone, checklist, environment record, build, tag, rig page and quota line you can see in this workspace. File bytes download from Files. Report pages are in the JSON.";
 var TEXT_FIELDS = ["description", "verbatim", "body", "plan", "outcome", "summary", "what", "decision", "ask", "text", "reply", "locator", "detail", "changes", "command"];
